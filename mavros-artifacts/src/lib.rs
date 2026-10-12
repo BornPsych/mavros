@@ -1,4 +1,5 @@
 pub mod field;
+pub mod manifest;
 
 use std::{collections::BTreeMap, fmt::Display};
 
@@ -6,6 +7,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::error;
 
 pub use field::{FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement, MavrosField};
+pub use manifest::{
+    ArtifactError, ChallengeSlot, ENTRY_BLOB_COLUMN_BASE, ManifestParam, ParamVisibility,
+    R1CS_ARTIFACT_FORMAT_VERSION, R1CS_ARTIFACT_MAGIC, R1CSArtifact, ReturnSlot, WitnessManifest,
+};
 
 // FIELD-ASSUMPTION: L1-alias
 pub type Field = ark_bn254::Fr;
