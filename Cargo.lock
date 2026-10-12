@@ -2327,7 +2327,6 @@ dependencies = [
  "ark-bn254",
  "ark-ff",
  "bimap",
- "bincode",
  "cargo_metadata",
  "clap",
  "codespan-reporting",
