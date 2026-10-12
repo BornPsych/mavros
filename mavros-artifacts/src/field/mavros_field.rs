@@ -32,12 +32,32 @@ use ark_ff::{AdditiveGroup, BigInt, PrimeField};
 
 /// Identifies one of Mavros' supported fields.
 ///
-/// No artifact encodes it: bytecode names its field by opcode identity. It selects per-field
-/// behaviour in the compiler through exhaustive matches, so a new variant is a compile error at
-/// every per-field site.
+/// Bytecode names its field by opcode identity, so only the `r1cs.bin` header encodes it, as the
+/// `u32` tag [`FieldId::code`] gives. Decoding must go through the checked [`FieldId::from_code`]:
+/// casting an untrusted `u32` straight into the enum would be undefined behaviour for an unknown
+/// value. It selects per-field behaviour in the compiler through exhaustive matches, so a new
+/// variant is a compile error at every per-field site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u32)]
 pub enum FieldId {
-    Bn254,
+    Bn254 = 0,
+}
+
+impl FieldId {
+    /// The wire encoding in the `r1cs.bin` header: the enum discriminant.
+    #[must_use]
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+
+    /// Decodes a [`FieldId`] from its wire encoding, or `None` if the value is not a known field.
+    #[must_use]
+    pub fn from_code(code: u32) -> Option<FieldId> {
+        match code {
+            0 => Some(FieldId::Bn254),
+            _ => None,
+        }
+    }
 }
 
 // FIELD TRAIT
@@ -207,6 +227,15 @@ mod tests {
     use super::*;
 
     type Fr = ark_bn254::Fr;
+
+    #[test]
+    fn field_id_code_round_trips() {
+        assert_eq!(
+            FieldId::from_code(FieldId::Bn254.code()),
+            Some(FieldId::Bn254)
+        );
+        assert_eq!(FieldId::from_code(1), None);
+    }
 
     fn samples() -> Vec<Fr> {
         let mut rng = ark_std::test_rng();
