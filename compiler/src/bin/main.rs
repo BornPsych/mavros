@@ -81,7 +81,7 @@ pub enum Command {
         #[arg(default_value = DEFAULT_NOIR_PROJECT_PATH, value_parser = parse_path)]
         path: PathBuf,
 
-        /// Output path for R1CS constraints (bincode).
+        /// Output path for the versioned R1CS artifact.
         #[arg(long, default_value = "target/r1cs.bin")]
         r1cs_output: PathBuf,
 
@@ -250,9 +250,10 @@ fn run_compile_package(
         }
     }
 
-    // Save R1CS as bincode
-    let r1cs_bytes = bincode::serialize(&r1cs)?;
-    fs::write(r1cs_output, r1cs_bytes)?;
+    let r1cs_artifact = driver.r1cs_artifact(r1cs)?;
+    let r1cs_constraints = r1cs_artifact.r1cs().constraints.len();
+    let r1cs_bytes = r1cs_artifact.to_bytes()?;
+    fs::write(r1cs_output, &r1cs_bytes)?;
 
     let basic = serde_json::json!({
         "binary": binary,
@@ -276,7 +277,8 @@ fn run_compile_package(
         message = %"Artifacts saved successfully",
         r1cs_output = ?r1cs_output,
         binary_output = ?binary_output,
-        r1cs_constraints = r1cs.constraints.len(),
+        r1cs_constraints,
+        r1cs_bytes = r1cs_bytes.len(),
         binary_size = binary.len() * 8,
     );
 
@@ -735,6 +737,64 @@ mod tests {
                 assert!(dir.path().join(member).join("target").join(file).is_file());
             }
         }
+    }
+
+    /// Witness-indexed access exercises LogUp challenge slots as well as ABI columns.
+    #[test]
+    fn compile_writes_versioned_witness_manifest() {
+        use mavros_artifacts::{ParamVisibility, R1CSArtifact};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Nargo.toml"),
+            "[package]\nname = \"manifest\"\ntype = \"bin\"\nauthors = []\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/main.nr"),
+            "fn main(x: Field, y: pub [u32; 3]) -> pub [Field; 2] { let arr = [1, x, 100, x + 1]; [arr[y[0]], x] }\n",
+        )
+        .unwrap();
+        let r1cs = root.join("target/r1cs.bin");
+        let binary = root.join("target/basic.json");
+        assert_eq!(
+            run_compile(&root, &r1cs, &binary, false, false, false, 128).unwrap(),
+            ExitCode::SUCCESS
+        );
+        let bytes = fs::read(&r1cs).unwrap();
+        let artifact = R1CSArtifact::from_bytes(&bytes).unwrap();
+        let manifest = artifact.manifest();
+        assert_eq!(manifest.entry_blob_field_count, 7);
+        let columns: Vec<_> = manifest
+            .parameters
+            .iter()
+            .map(|p| {
+                (
+                    p.name.as_str(),
+                    p.visibility,
+                    p.blob_offset,
+                    p.column_start,
+                    p.width,
+                )
+            })
+            .collect();
+        assert_eq!(
+            columns,
+            vec![
+                ("x", ParamVisibility::Private, 0, Some(1), 1),
+                ("y", ParamVisibility::Public, 1, Some(2), 3)
+            ]
+        );
+        assert_eq!(manifest.guard_column, Some(5));
+        let ret = manifest.returns.unwrap();
+        assert_eq!((ret.column_start, ret.len), (6, 2));
+        assert_eq!(ret.visibility, ParamVisibility::Public);
+        let layout = artifact.r1cs().witness_layout;
+        assert!(
+            layout.challenges_size > 0,
+            "a witness-indexed array read should need LogUp challenges"
+        );
     }
 
     #[test]
