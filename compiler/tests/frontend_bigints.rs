@@ -29,9 +29,8 @@ fn check(source: &str, inputs: &str) {
     let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
     let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
     assert!(api::check_witgen(&r1cs, &result));
-    abi_helpers::check_return_guard(
-        driver.abi(),
-        &r1cs.witness_layout,
+    abi_helpers::check_witness_manifest(
+        &driver.witness_manifest(&r1cs).unwrap(),
         &params,
         &result.out_wit_pre_comm,
     )
