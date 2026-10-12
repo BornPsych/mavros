@@ -15,8 +15,10 @@ use mavros_compiler::{
 };
 
 use tracing::{error, info, warn};
-use tracing_forest::ForestLayer;
-use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_forest::{ForestLayer, printer::PrettyPrinter};
+use tracing_subscriber::{
+    EnvFilter, Registry, fmt::writer::BoxMakeWriter, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -48,6 +50,18 @@ pub struct ProgramOptions {
 
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub skip_vm: bool,
+
+    /// Compute (rAw, rBw, rCw) for supplied vectors, without witness generation.
+    #[arg(long, requires = "r", requires = "w", conflicts_with_all = ["skip_vm", "profile"])]
+    pub verify: bool,
+
+    /// JSON array of decimal field strings, one per constraint, for --verify.
+    #[arg(long, value_name = "PATH", requires = "verify")]
+    pub r: Option<PathBuf>,
+
+    /// JSON array of decimal field strings covering the full witness layout, for --verify.
+    #[arg(long, value_name = "PATH", requires = "verify")]
+    pub w: Option<PathBuf>,
 
     /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the Noir package root.
     #[arg(long, action = clap::ArgAction::SetTrue)]
@@ -103,12 +117,22 @@ fn main() -> ExitCode {
     // Parse args and hand-off immediately.
     let args = ProgramOptions::parse();
 
+    // Keep verifier stdout machine-readable even when tracing is enabled.
+    let log_writer = if args.verify {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stdout)
+    };
     Registry::default()
-        .with(ForestLayer::default())
+        .with(ForestLayer::from(PrettyPrinter::new().writer(log_writer)))
         .with(EnvFilter::from_default_env())
         .init();
 
     let result = match &args.command {
+        Some(Command::Compile { .. }) if args.verify => Err(std::io::Error::other(
+            "--verify executes the verifier and cannot be combined with the compile subcommand",
+        )
+        .into()),
         Some(Command::Compile { .. }) if args.profile => Err(std::io::Error::other(
             "--profile runs the full pipeline and cannot be combined with the compile subcommand",
         )
@@ -388,10 +412,33 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
     let artifact = api::compile_bytecode_artifact(&mut driver, codegen_options)?;
     let mut binary = artifact.binary;
     let vm_debug_info = artifact.debug_info;
+
+    if args.verify {
+        let r = read_verifier_vector(args.r.as_deref().expect("--verify requires --r"))?;
+        let w = read_verifier_vector(args.w.as_deref().expect("--verify requires --w"))?;
+        let result = api::run_verifier_from_binary(&binary, &r1cs, &r, &w, vm_debug_info).map_err(
+            |mut error| {
+                if let Some(root) = &source_path_root {
+                    error.relativize_source_paths(root);
+                }
+                error
+            },
+        )?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "r_aw": result.r_aw.to_string(),
+                "r_bw": result.r_bw.to_string(),
+                "r_cw": result.r_cw.to_string(),
+            })
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
 
     let witgen_execution = if args.profile {
         api::run_witgen_profiled_from_binary(&mut binary, &r1cs, &params, vm_debug_info.clone())
@@ -604,6 +651,32 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
     }
 }
 
+/// Read verifier inputs without losing precision to JSON's numeric representation.
+fn read_verifier_vector(path: &Path) -> Result<Vec<RawField>, Error> {
+    let values: Vec<String> = serde_json::from_str(&fs::read_to_string(path)?).map_err(|err| {
+        format!(
+            "{}: expected a JSON array of decimal field strings: {err}",
+            path.display()
+        )
+    })?;
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(format!(
+                    "{}: invalid decimal field element at index {index}",
+                    path.display()
+                )
+                .into());
+            }
+            value.parse::<RawField>().map_err(|_| {
+                format!("{}: invalid field element at index {index}", path.display()).into()
+            })
+        })
+        .collect()
+}
+
 // Copied from: https://github.com/noir-lang/noir/blob/5071093f9b51e111a49a5f78d827774ef8e80c74/tooling/nargo_cli/src/cli/mod.rs#L301
 /// Parses a path and turns it into an absolute one by joining to the current
 /// directory.
@@ -621,6 +694,55 @@ fn parse_path(path: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verifier_cli_requires_vectors_and_rejects_conflicting_modes() {
+        for args in [
+            vec!["mavros", "--verify"],
+            vec!["mavros", "--verify", "--r", "r.json"],
+            vec!["mavros", "--verify", "--w", "w.json"],
+            vec!["mavros", "--r", "r.json", "--w", "w.json"],
+            vec![
+                "mavros",
+                "--verify",
+                "--r",
+                "r.json",
+                "--w",
+                "w.json",
+                "--skip-vm",
+            ],
+            vec![
+                "mavros",
+                "--verify",
+                "--r",
+                "r.json",
+                "--w",
+                "w.json",
+                "--profile",
+            ],
+        ] {
+            assert!(ProgramOptions::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn verifier_vectors_use_decimal_strings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vector.json");
+        fs::write(&path, r#"["0", "1", "12345678901234567890"]"#).unwrap();
+        assert_eq!(
+            read_verifier_vector(&path).unwrap(),
+            vec![
+                RawField::from(0u64),
+                RawField::from(1u64),
+                RawField::from(12345678901234567890u64),
+            ]
+        );
+        for input in [r#"[1]"#, r#"["nope"]"#, r#"[""]"#, r#"["-1"]"#, "{}"] {
+            fs::write(&path, input).unwrap();
+            assert!(read_verifier_vector(&path).is_err(), "{input}");
+        }
+    }
 
     fn workspace_fixture() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

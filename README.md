@@ -38,6 +38,31 @@ versioned source map records VM bytecode word offsets, function names, and Noir 
 the executable bytecode in `basic.json` remains byte-for-byte unchanged. Source paths are relative
 to the Noir package root by default; pass `--absolute-paths` to retain absolute paths.
 
+### Verifier Mode
+
+Compute the Spartan matrix contractions `(rAw, rBw, rCw)` with caller-supplied field vectors:
+
+```bash
+mavros --root ./my-noir-project --verify --r r.json --w w.json
+```
+
+Both files contain JSON arrays of decimal field strings, for example `["3", "17", "42"]`.
+`r` has one entry per R1CS constraint. `w` covers the complete witness layout in order:
+algebraic witnesses (including column zero), multiplicities, challenges, table data, and lookup
+data. Vector lengths must match exactly. All entries may be arbitrary, including `w[0]`; the
+caller supplies any protocol randomness. Paths to vector files are relative to the current
+working directory.
+
+The command compiles the project and prints a JSON object with `r_aw`, `r_bw`, and `r_cw` as
+decimal strings. It needs no `Prover.toml` and does not check R1CS satisfaction. This operation
+is a component of a verifier, not a complete proof verification protocol.
+
+Rust callers can use `mavros_compiler::api::run_verifier_from_binary(&binary, &r1cs, &r, &w, None)`.
+Hosts retaining only bytecode and layouts can use `mavros_vm::interpreter::run_verifier` directly.
+Verifier execution reuses the compiled AD constraint traversal and contracts each column
+contribution directly with `w`, accumulating three scalars without materializing matrices or AD
+output vectors. Existing compiled bytecode containing an AD entry point can be reused.
+
 ### Per-Function FlameGraphs
 
 Run the full compiler and VM pipeline with `--profile` to generate interactive per-function

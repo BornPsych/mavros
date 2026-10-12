@@ -851,6 +851,63 @@ pub fn run_profiled(
     ))
 }
 
+/// The three matrix contractions used by a Spartan verifier. These values do not
+/// indicate whether a witness satisfies the circuit.
+pub struct VerifierResult {
+    pub r_aw: Field,
+    pub r_bw: Field,
+    pub r_cw: Field,
+    pub instrumenter: AllocationInstrumenter,
+}
+
+/// Compute `(r A w, r B w, r C w)` from the compiled constraint traversal.
+///
+/// `r` has one entry per constraint and `w` covers the entire witness layout,
+/// including multiplicities, challenges, and lookup witnesses. Every entry is
+/// arbitrary: in particular, `w[0]` need not be one. No prover inputs or satisfying
+/// witness are required. The existing AD entry point supplies the constraint
+/// traversal, but its column contributions are contracted directly with `w`,
+/// without allocating AD output vectors or materializing the R1CS matrices.
+#[instrument(skip_all, name = "Interpreter::run_verifier")]
+pub fn run_verifier(
+    program: &[u64],
+    r: &[Field],
+    w: &[Field],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    debug_info: Option<bytecode::DebugInfo>,
+) -> Result<VerifierResult, TrapError> {
+    if w.len() != witness_layout.size() {
+        return Err(TrapError {
+            message: Some(format!(
+                "verifier w length: expected {}, got {}",
+                witness_layout.size(),
+                w.len()
+            )),
+            stack_trace: Vec::new(),
+        });
+    }
+    let mut a = Field::ZERO;
+    let mut b = Field::ZERO;
+    let mut c = Field::ZERO;
+    let (instrumenter, _) = run_constraint_program(
+        program,
+        r,
+        witness_layout,
+        constraints_layout,
+        debug_info,
+        false,
+        [&mut a, &mut b, &mut c],
+        Some(w),
+    )?;
+    Ok(VerifierResult {
+        r_aw: a,
+        r_bw: b,
+        r_cw: c,
+        instrumenter,
+    })
+}
+
 #[instrument(skip_all, name = "Interpreter::run_ad")]
 pub fn run_ad(
     program: &[u64],
@@ -915,6 +972,49 @@ fn run_ad_impl(
     ),
     TrapError,
 > {
+    let mut out_da = vec![Field::ZERO; witness_layout.size()];
+    let mut out_db = vec![Field::ZERO; witness_layout.size()];
+    let mut out_dc = vec![Field::ZERO; witness_layout.size()];
+    let (instrumenter, profile) = run_constraint_program(
+        program,
+        coeffs,
+        witness_layout,
+        constraints_layout,
+        debug_info,
+        profile,
+        [
+            out_da.as_mut_ptr(),
+            out_db.as_mut_ptr(),
+            out_dc.as_mut_ptr(),
+        ],
+        None,
+    )?;
+    Ok((out_da, out_db, out_dc, instrumenter, profile))
+}
+
+/// Shared dispatch for AD and verifier execution. The output storage is owned by
+/// the callers above and remains alive until dispatch and reference-counted
+/// sensitivity propagation finish.
+fn run_constraint_program(
+    program: &[u64],
+    coeffs: &[Field],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    debug_info: Option<bytecode::DebugInfo>,
+    profile: bool,
+    outputs: [*mut Field; 3],
+    verifier_witness: Option<&[Field]>,
+) -> Result<(AllocationInstrumenter, crate::FlamegraphProfile), TrapError> {
+    if coeffs.len() != constraints_layout.size() {
+        return Err(TrapError {
+            message: Some(format!(
+                "constraint coefficient length: expected {}, got {}",
+                constraints_layout.size(),
+                coeffs.len()
+            )),
+            stack_trace: Vec::new(),
+        });
+    }
     let header = parse_program_header(program);
     let debug_info = debug_info.unwrap_or_default();
     let entry = *header
@@ -922,14 +1022,11 @@ fn run_ad_impl(
         .get(ENTRY_AD)
         .expect("Program has no AD entry point");
     let global_frame_size = header.global_frame_size;
-    let mut out_da = vec![Field::ZERO; witness_layout.size()];
-    let mut out_db = vec![Field::ZERO; witness_layout.size()];
-    let mut out_dc = vec![Field::ZERO; witness_layout.size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_ad(
-        out_da.as_mut_ptr(),
-        out_db.as_mut_ptr(),
-        out_dc.as_mut_ptr(),
+        outputs[0],
+        outputs[1],
+        outputs[2],
         coeffs.as_ptr(),
         witness_layout,
         constraints_layout,
@@ -937,6 +1034,9 @@ fn run_ad_impl(
         header.struct_layouts,
         header.constant_pool,
     );
+    if let Some(w) = verifier_witness {
+        unsafe { vm.set_verifier_witness(w.as_ptr()) };
+    }
 
     let frame = Frame::push(
         program[entry + 1],
@@ -958,7 +1058,11 @@ fn run_ad_impl(
     unsafe { dispatch(pc, frame, &mut vm) };
 
     #[cfg(feature = "vm-profile")]
-    vm.report_opcode_profile("AD");
+    vm.report_opcode_profile(if verifier_witness.is_some() {
+        "Verifier"
+    } else {
+        "AD"
+    });
 
     if vm.trapped {
         return Err(TrapError {
@@ -968,13 +1072,7 @@ fn run_ad_impl(
     }
 
     let instruction_profile = vm.take_instruction_profile();
-    Ok((
-        out_da,
-        out_db,
-        out_dc,
-        vm.allocation_instrumenter,
-        instruction_profile,
-    ))
+    Ok((vm.allocation_instrumenter, instruction_profile))
 }
 
 /// Flatten ordered input values into the entry blob's field sequence.

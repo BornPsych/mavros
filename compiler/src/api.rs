@@ -170,6 +170,30 @@ pub fn run_ad_from_binary(
     )
 }
 
+/// Compute `(r A w, r B w, r C w)` for arbitrary field vectors, without executing
+/// witness generation or checking satisfaction. `r` must have one element per
+/// constraint; `w` must cover the complete witness layout, including column zero
+/// and the post-commitment sections. Randomness is supplied by the caller.
+///
+/// Only the layouts are read from `r1cs`. Hosts that retain bytecode and layouts
+/// without the matrices can call [`interpreter::run_verifier`] directly.
+pub fn run_verifier_from_binary(
+    binary: &[u64],
+    r1cs: &R1CS,
+    r: &[RawField],
+    w: &[RawField],
+    debug_info: Option<DebugInfo>,
+) -> Result<interpreter::VerifierResult, interpreter::TrapError> {
+    interpreter::run_verifier(
+        binary,
+        r,
+        w,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        debug_info,
+    )
+}
+
 pub fn run_ad_profiled_from_binary(
     binary: &mut [u64],
     r1cs: &R1CS,
