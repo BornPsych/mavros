@@ -47,10 +47,10 @@
 //! booleanity constraint lives in the guard's reconstruct function and survives only as long as
 //! the guarded asserts consuming it do.
 //!
-//! Cost: one witness column, one blob slot, and one booleanity row per program; each leaf check
+//! Cost: one witness column, one blob slot, and one booleanity row per declared return; each leaf check
 //! stays a single R1C (see `assert_eq_deep_guarded`).
 
-use std::collections::BTreeSet;
+use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
 use crate::{
     collections::HashMap,
@@ -74,9 +74,28 @@ use mavros_int_semantics::IntBits;
 /// Origin of the synthetic source location the wrapper's return-value assertion carries.
 pub const RETURN_CHECK_ORIGIN: &str = "public return value check";
 
+/// A contiguous run of fields in the entry blob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobSlot {
+    pub offset: usize,
+    pub width: usize,
+}
+
+/// Parameter, guard and return slots in the entry blob.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryBlobLayout {
+    pub params: Vec<BlobSlot>,
+    /// Offset of the return guard, present exactly when the ABI declares a return.
+    pub guard: Option<usize>,
+    pub returns: Option<BlobSlot>,
+    pub total: usize,
+}
+
 pub struct PrepareEntryPoint {
     main_is_unconstrained: bool,
     abi_has_return: Option<bool>,
+    /// Records the wrapper's layout for the driver.
+    layout_sink: Option<Rc<RefCell<Option<EntryBlobLayout>>>>,
 }
 
 struct PrepareFnEntry {
@@ -141,7 +160,10 @@ impl Pass for PrepareEntryPoint {
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
-        Self::wrap_main(ssa, self.main_is_unconstrained, self.abi_has_return);
+        let layout = Self::wrap_main(ssa, self.main_is_unconstrained, self.abi_has_return);
+        if let Some(sink) = &self.layout_sink {
+            *sink.borrow_mut() = Some(layout);
+        }
         Self::process_unconstrained_calls(ssa);
     }
 }
@@ -154,6 +176,7 @@ impl PrepareEntryPoint {
         Self {
             main_is_unconstrained,
             abi_has_return: None,
+            layout_sink: None,
         }
     }
 
@@ -164,7 +187,16 @@ impl PrepareEntryPoint {
         self
     }
 
-    fn wrap_main(ssa: &mut HLSSA, main_is_unconstrained: bool, abi_has_return: Option<bool>) {
+    pub fn with_layout_sink(mut self, sink: Rc<RefCell<Option<EntryBlobLayout>>>) -> Self {
+        self.layout_sink = Some(sink);
+        self
+    }
+
+    fn wrap_main(
+        ssa: &mut HLSSA,
+        main_is_unconstrained: bool,
+        abi_has_return: Option<bool>,
+    ) -> EntryBlobLayout {
         let original_main_id = ssa.get_unique_entrypoint_id();
         let original_main = ssa.get_unique_entrypoint();
         let param_types = original_main.get_param_types();
@@ -194,7 +226,8 @@ impl PrepareEntryPoint {
             Self::get_or_create_reconstruct_fn(&guard_type, ssa, &mut reconstruct_fns);
         }
 
-        let total_fields = Self::entry_blob_field_count(&param_types, &return_types, has_return);
+        let layout = Self::entry_blob_layout(&param_types, &return_types, has_return);
+        let total_fields = layout.total;
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
         let mut sb = HLSSABuilder::new(ssa);
@@ -231,16 +264,15 @@ impl PrepareEntryPoint {
                 copied[0]
             });
 
-            // Rebuild each typed input value from its slice of the witness array.
-            let mut offset = 0usize;
-            let mut input_value = |e: &mut HLBlockEmitter<'_>, typ: &Type| {
-                let width = Self::flattened_field_count(typ);
+            let input_value = |e: &mut HLBlockEmitter<'_>, typ: &Type, slot: BlobSlot| {
+                let BlobSlot { offset, width } = slot;
+                debug_assert_eq!(width, Self::flattened_field_count(typ));
                 if width == 0 {
                     return Self::emit_default_witness_value(e, typ);
                 }
                 let witness_inputs =
                     witness_inputs.expect("a nonempty typed input requires witness fields");
-                let value = match &typ.expr {
+                match &typ.expr {
                     TypeExpr::Field => {
                         let index = e.int_const(IntBits::from_u128(32, offset as u128));
                         e.array_get(witness_inputs, index)
@@ -256,23 +288,32 @@ impl PrepareEntryPoint {
                         e.call(fn_id, vec![child], 1)[0]
                     }
                     _ => todo!("Not implemented yet"),
-                };
-                offset += width;
-                value
+                }
             };
 
             let mut arg_values = Vec::new();
-            for typ in &param_types {
-                arg_values.push(input_value(&mut e, typ));
+            for (typ, slot) in param_types.iter().zip(&layout.params) {
+                arg_values.push(input_value(&mut e, typ, *slot));
             }
 
-            let return_guard = has_return.then(|| input_value(&mut e, &guard_type));
+            let return_guard = layout
+                .guard
+                .map(|offset| input_value(&mut e, &guard_type, BlobSlot { offset, width: 1 }));
 
             let mut return_input_values = Vec::new();
-            if has_return {
+            if let Some(returns) = layout.returns {
+                // HLSSA results occupy consecutive slots in the declared return range.
+                let mut offset = returns.offset;
                 for typ in &return_types {
-                    return_input_values.push(input_value(&mut e, typ));
+                    let width = Self::flattened_field_count(typ);
+                    return_input_values.push(input_value(&mut e, typ, BlobSlot { offset, width }));
+                    offset += width;
                 }
+                assert_eq!(
+                    offset,
+                    returns.offset + returns.width,
+                    "ICE: declared return values do not fill the layout's return run"
+                );
             }
 
             if let Some(init_fn) = globals_init_fn {
@@ -309,6 +350,7 @@ impl PrepareEntryPoint {
             e.terminate_return(vec![]);
         });
         ssa.set_unique_entrypoint(wrapper_id);
+        layout
     }
 
     fn assert_eq_deep_guarded(
@@ -520,17 +562,39 @@ impl PrepareEntryPoint {
         format!("reconstruct_{}", reconstruct_fns.len())
     }
 
-    pub(crate) fn entry_blob_field_count(
+    /// Blob slots in parameter, guard and return order.
+    /// Blob offset `i` is witness column `ENTRY_BLOB_COLUMN_BASE + i`.
+    pub(crate) fn entry_blob_layout(
         param_types: &[Type],
         return_types: &[Type],
         has_return: bool,
-    ) -> usize {
-        param_types
+    ) -> EntryBlobLayout {
+        let mut offset = 0usize;
+        let mut slot = |width: usize| {
+            let start = offset;
+            offset += width;
+            BlobSlot {
+                offset: start,
+                width,
+            }
+        };
+        let params = param_types
             .iter()
-            .chain(return_types.iter().filter(|_| has_return))
-            .map(Self::flattened_field_count)
-            .sum::<usize>()
-            + usize::from(has_return)
+            .map(|typ| slot(Self::flattened_field_count(typ)))
+            .collect();
+        let (guard, returns) = if has_return {
+            let guard = slot(1).offset;
+            let width = return_types.iter().map(Self::flattened_field_count).sum();
+            (Some(guard), Some(slot(width)))
+        } else {
+            (None, None)
+        };
+        EntryBlobLayout {
+            params,
+            guard,
+            returns,
+            total: offset,
+        }
     }
 
     /// How many elements of the entry point's input blob a value of `typ` occupies.
