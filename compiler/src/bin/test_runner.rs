@@ -360,7 +360,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
                 &result.out_a,
                 &result.out_b,
                 &result.out_c,
-            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
+            ) && check_witness_manifest(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_CORRECT:ok"
         } else {
@@ -550,7 +550,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
                 &result.out_a,
                 &result.out_b,
                 &result.out_c,
-            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
+            ) && check_witness_manifest(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
@@ -612,8 +612,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     }
 }
 
-/// True when the generated witness's return-guard column matches the parsed inputs.
-fn check_return_guard(
+fn check_witness_manifest(
     driver: &Driver,
     r1cs: &R1CS,
     ordered_params: &Result<Vec<interpreter::InputValueOrdered>, String>,
@@ -622,8 +621,11 @@ fn check_return_guard(
     let Ok(params) = ordered_params else {
         return false;
     };
-    abi_helpers::check_return_guard(driver.abi(), &r1cs.witness_layout, params, wit_pre_comm)
-        .inspect_err(|reason| eprintln!("return-guard check failed: {reason}"))
+    driver
+        .witness_manifest(r1cs)
+        .map_err(|error| error.to_string())
+        .and_then(|manifest| abi_helpers::check_witness_manifest(&manifest, params, wit_pre_comm))
+        .inspect_err(|reason| eprintln!("witness manifest check failed: {reason}"))
         .is_ok()
 }
 
