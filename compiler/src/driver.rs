@@ -17,7 +17,10 @@ use noirc_frontend::{
 };
 use tracing::info;
 
-use mavros_artifacts::Field as RawField;
+use mavros_artifacts::{
+    ChallengeSlot, ENTRY_BLOB_COLUMN_BASE, Field as RawField, ManifestParam, ParamVisibility,
+    R1CSArtifact, ReturnSlot, WitnessManifest,
+};
 
 use crate::{
     Project,
@@ -55,7 +58,7 @@ use crate::{
             merge_identical_functions::MergeIdenticalFunctions,
             normalize_asserts::NormalizeAsserts,
             partial_redundancy_elimination::PRE,
-            prepare_entry_point::PrepareEntryPoint,
+            prepare_entry_point::{EntryBlobLayout, PrepareEntryPoint},
             purify_witness_slices::PurifyWitnessSlices,
             rc_insertion::RCInsertion,
             remove_unreachable_blocks::RemoveUnreachableBlocks,
@@ -108,6 +111,8 @@ pub struct Driver {
     /// this single SSA.
     program_ssa: Option<HLSSA>,
     abi: Option<noirc_abi::Abi>,
+    /// Layout recorded by `PrepareEntryPoint` for the witness manifest.
+    entry_blob_layout: Option<EntryBlobLayout>,
     draw_cfg: bool,
     main_is_unconstrained: bool,
     /// Requested LogUp bits-of-security (from `--logup-soundness`); sizes the challenge count.
@@ -138,6 +143,9 @@ pub enum Error {
     ///
     /// Carries every failing assertion so a single compile reports them all.
     AssertConstantFailed(Vec<SourceLocation>),
+
+    /// Missing ABI or inconsistent entry-point/R1CS layouts.
+    WitnessManifest(String),
 }
 
 impl std::fmt::Display for Error {
@@ -160,6 +168,7 @@ impl std::fmt::Display for Error {
                 }
                 Ok(())
             }
+            Error::WitnessManifest(message) => write!(f, "witness manifest: {message}"),
         }
     }
 }
@@ -182,6 +191,7 @@ impl Driver {
             r1cs_profiling: false,
             program_ssa: None,
             abi: None,
+            entry_blob_layout: None,
             draw_cfg,
             main_is_unconstrained: false,
             logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
@@ -211,6 +221,7 @@ impl Driver {
             r1cs_profiling: false,
             program_ssa: None,
             abi: None,
+            entry_blob_layout: None,
             draw_cfg,
             main_is_unconstrained: false,
             logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
@@ -381,7 +392,9 @@ impl Driver {
             ));
         }
 
-        let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained);
+        let entry_blob_layout = Rc::new(RefCell::new(None));
+        let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained)
+            .with_layout_sink(Rc::clone(&entry_blob_layout));
         if let Some(abi) = &self.abi {
             prepare_entry_point = prepare_entry_point.with_abi_return(abi.return_type.is_some());
         }
@@ -428,6 +441,12 @@ impl Driver {
 
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
         pass_manager.run(&mut ssa);
+        self.entry_blob_layout = Some(
+            entry_blob_layout
+                .borrow_mut()
+                .take()
+                .expect("prepare_entry_point records the entry blob layout it used"),
+        );
         self.static_struct_access_ssa = Some(ssa);
         Ok(())
     }
@@ -711,8 +730,7 @@ impl Driver {
         // Captured before `r1cs_ssa` is stored away; sizes the LogUp per-challenge soundness.
         let field = r1cs_ssa.field();
         let (r1cs, profile) =
-            // The guard's position is ABI-derived, and read only by the test runner's return-guard
-            // check. A driver from [`Self::from_ssa`] has no ABI, and nothing asks it for that.
+            // The guard's position is ABI-derived; a driver from [`Self::from_ssa`] has no ABI.
             match r1cs_gen.seal_with_profile(
                 self.abi.as_ref().and_then(crate::abi_helpers::guard_layout),
             ) {
@@ -827,6 +845,79 @@ impl Driver {
 
     pub fn abi(&self) -> &noirc_abi::Abi {
         self.abi.as_ref().unwrap()
+    }
+
+    /// Builds a manifest from the wrapper layout and ABI, validated against `r1cs`.
+    /// Requires a project-backed driver with the entry point prepared.
+    pub fn witness_manifest(&self, r1cs: &R1CS) -> Result<WitnessManifest, Error> {
+        let abi = self.abi.as_ref().ok_or_else(|| {
+            Error::WitnessManifest("driver has no ABI (seeded from HLSSA)".to_string())
+        })?;
+        let blob = self.entry_blob_layout.as_ref().ok_or_else(|| {
+            Error::WitnessManifest(
+                "entry blob layout not captured; run make_struct_access_static first".to_string(),
+            )
+        })?;
+        if abi.parameters.len() != blob.params.len()
+            || blob.total != crate::abi_helpers::flattened_io_count(abi)
+        {
+            return Err(Error::WitnessManifest(format!(
+                "ABI flattens to {} parameters and {} fields but the entry point has {} and {}",
+                abi.parameters.len(),
+                crate::abi_helpers::flattened_io_count(abi),
+                blob.params.len(),
+                blob.total
+            )));
+        }
+        let layout = r1cs.witness_layout;
+        let manifest = WitnessManifest {
+            entry_blob_field_count: blob.total,
+            parameters: abi
+                .parameters
+                .iter()
+                .zip(&blob.params)
+                .map(|(param, slot)| ManifestParam {
+                    name: param.name.clone(),
+                    visibility: abi_visibility(param.visibility),
+                    blob_offset: slot.offset,
+                    width: slot.width,
+                    column_start: Some(ENTRY_BLOB_COLUMN_BASE + slot.offset),
+                })
+                .collect(),
+            guard_column: blob.guard.map(|offset| ENTRY_BLOB_COLUMN_BASE + offset),
+            returns: blob
+                .returns
+                .zip(abi.return_type.as_ref())
+                .map(|(slot, ret)| ReturnSlot {
+                    column_start: ENTRY_BLOB_COLUMN_BASE + slot.offset,
+                    len: slot.width,
+                    visibility: abi_visibility(ret.visibility),
+                }),
+            challenges: (0..layout.challenges_size)
+                .map(|i| ChallengeSlot {
+                    witness_index: layout.challenges_start() + i,
+                    w2_offset: i,
+                })
+                .collect(),
+            pre_commitment_size: layout.pre_commitment_size(),
+            witness_count: layout.size(),
+            constraint_count: r1cs.constraints.len(),
+        };
+        manifest.validate(r1cs).map_err(Error::WitnessManifest)?;
+        Ok(manifest)
+    }
+
+    /// Packs `r1cs` with its witness manifest and field into the versioned `r1cs.bin` artifact.
+    /// Requires [`Self::generate_r1cs`] to have produced `r1cs`.
+    pub fn r1cs_artifact(&self, r1cs: R1CS) -> Result<R1CSArtifact, Error> {
+        let field = self
+            .r1cs_ssa
+            .as_ref()
+            .ok_or_else(|| Error::WitnessManifest("R1CS has not been generated".to_string()))?
+            .field()
+            .id();
+        let manifest = self.witness_manifest(&r1cs)?;
+        Ok(R1CSArtifact::new(field, manifest, r1cs))
     }
 
     /// Flattened field count of the entry point's parameters and return value — the size of the
@@ -1039,13 +1130,15 @@ impl Driver {
             .as_ref()
             .map_or(0, |ret| ret.abi_type.field_count());
 
+        let manifest = serde_json::to_value(self.witness_manifest(r1cs)?).unwrap();
         let metadata = serde_json::json!({
             "witnessCount": r1cs.witness_layout.size(),
             "constraintCount": r1cs.constraints.len(),
             "parameters": parameters,
             "hasReturn": abi.return_type.is_some(),
             "returnElementCount": return_element_count,
-            "entryBlobFieldCount": self.entry_point_flattened_io_count()
+            "entryBlobFieldCount": self.entry_point_flattened_io_count(),
+            "witnessManifest": manifest
         });
 
         let metadata_path = format!("{}.meta.json", wasm_path.display());
@@ -1058,6 +1151,14 @@ impl Driver {
         info!(message = %"WASM metadata generated", path = %metadata_path);
 
         Ok(())
+    }
+}
+
+fn abi_visibility(visibility: noirc_abi::AbiVisibility) -> ParamVisibility {
+    match visibility {
+        noirc_abi::AbiVisibility::Public => ParamVisibility::Public,
+        noirc_abi::AbiVisibility::Private => ParamVisibility::Private,
+        noirc_abi::AbiVisibility::DataBus => ParamVisibility::DataBus,
     }
 }
 
@@ -1233,11 +1334,12 @@ mod tests {
             let abi = abi_of(abi_params, abi_return);
             assert_eq!(
                 flattened_io_count(&abi),
-                PrepareEntryPoint::entry_blob_field_count(
+                PrepareEntryPoint::entry_blob_layout(
                     &hlssa_params,
                     &hlssa_returns,
                     abi.return_type.is_some(),
-                ),
+                )
+                .total,
                 "blob size mismatch for ABI {:?} vs HLSSA ({hlssa_params:?}, {hlssa_returns:?})",
                 (&abi.parameters, &abi.return_type),
             );
