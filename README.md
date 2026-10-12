@@ -46,16 +46,15 @@ Compute the Spartan matrix contractions `(rAw, rBw, rCw)` with caller-supplied f
 mavros --root ./my-noir-project --verify --r r.json --w w.json
 ```
 
-Both files contain JSON arrays of decimal field strings, for example `["3", "17", "42"]`.
-`r` has one entry per R1CS constraint. `w` covers the complete witness layout in order:
-algebraic witnesses (including column zero), multiplicities, challenges, table data, and lookup
-data. Vector lengths must match exactly. All entries may be arbitrary, including `w[0]`; the
-caller supplies any protocol randomness. Paths to vector files are relative to the current
-working directory.
+Both files contain JSON arrays of decimal field strings, for example `["3", "17", "42"]`. `r` has
+one entry per R1CS constraint. `w` covers the complete witness layout in order: algebraic witnesses
+(including column zero), multiplicities, challenges, table data, and lookup data. Vector lengths
+must match exactly. All entries may be arbitrary, including `w[0]`; the caller supplies any protocol
+randomness. Paths to vector files are relative to the current working directory.
 
-The command compiles the project and prints a JSON object with `r_aw`, `r_bw`, and `r_cw` as
-decimal strings. It needs no `Prover.toml` and does not check R1CS satisfaction. This operation
-is a component of a verifier, not a complete proof verification protocol.
+The command compiles the project and prints a JSON object with `r_aw`, `r_bw`, and `r_cw` as decimal
+strings. It needs no `Prover.toml` and does not check R1CS satisfaction. This operation is a
+component of a verifier, not a complete proof verification protocol.
 
 Rust callers can use `mavros_compiler::api::run_verifier_from_binary(&binary, &r1cs, &r, &w, None)`.
 Hosts retaining only bytecode and layouts can use `mavros_vm::interpreter::run_verifier` directly.
