@@ -4,16 +4,6 @@ use tracing::warn;
 
 use mavros_artifacts::{InputValueOrdered, WitnessManifest};
 
-/// Converts a BTreeMap of input values (keyed by parameter name) into a Vec of
-/// InputValueOrdered, ordered according to the Noir ABI parameter order.
-///
-/// When the ABI declares a return value, the guard slot and the declared return
-/// are appended after the regular parameters. An input map without a `return`
-/// key sets the guard to 0 and zero-fills the declared return, which disables
-/// the return-value check (see `prepare_entry_point`); that is warned about
-/// rather than rejected, so a misspelled key cannot silently disable the check.
-///
-/// Errors when a declared parameter has no value in the map.
 pub fn ordered_params_from_btreemap(
     abi: &noirc_abi::Abi,
     unordered_params: &BTreeMap<String, InputValue>,
@@ -27,44 +17,37 @@ pub fn ordered_params_from_btreemap(
         ordered_params.push(ordered_param(&param.typ, param_value)?);
     }
 
-    if let Some(return_type) = &abi.return_type {
-        match unordered_params.get(MAIN_RETURN_NAME) {
-            Some(return_value) => {
-                ordered_params.push(field_param(1));
-                ordered_params.push(ordered_param(&return_type.abi_type, return_value)?);
-            }
-            None => {
-                warn!(message = %format!(
-                    "the ABI declares a return value but the inputs do not supply \
-                     `{MAIN_RETURN_NAME}`; the return-value check is disabled (guard = 0)"
-                ));
-                ordered_params.push(field_param(0));
-                ordered_params.push(zero_param(&return_type.abi_type));
-            }
-        }
-    }
-
     let flattened = crate::vm::interpreter::flattened_param_count(&ordered_params);
-    if flattened != flattened_io_count(abi) {
-        return Err("ordered params do not flatten to the ABI's io count".to_string());
+    if flattened != abi.field_count() as usize {
+        return Err("ordered params do not flatten to the ABI's field count".to_string());
     }
     Ok(ordered_params)
 }
 
-pub fn guard_layout(abi: &noirc_abi::Abi) -> Option<(usize, usize)> {
-    abi.return_type.as_ref().map(|ret| {
-        (
-            1 + abi.field_count() as usize,
-            ret.abi_type.field_count() as usize,
-        )
-    })
+pub fn declared_return_from_btreemap(
+    abi: &noirc_abi::Abi,
+    unordered_params: &BTreeMap<String, InputValue>,
+) -> Result<Option<InputValueOrdered>, String> {
+    match (&abi.return_type, unordered_params.get(MAIN_RETURN_NAME)) {
+        (Some(return_type), Some(value)) => Ok(Some(ordered_param(&return_type.abi_type, value)?)),
+        (Some(_), None) => {
+            warn!(message = %format!(
+                "the ABI declares a return value but the inputs do not supply \
+                 `{MAIN_RETURN_NAME}`; the computed return is not checked"
+            ));
+            Ok(None)
+        }
+        (None, _) => Ok(None),
+    }
 }
 
-/// Checks that the named witness columns hold the corresponding input fields.
+/// Checks that the named witness columns hold the corresponding input fields, and that the
+/// return columns hold `declared_return` when one was given.
 /// `manifest` must already be validated against the R1CS.
 pub fn check_witness_manifest(
     manifest: &WitnessManifest,
     ordered_params: &[InputValueOrdered],
+    declared_return: Option<&InputValueOrdered>,
     wit_pre_comm: &[mavros_artifacts::Field],
 ) -> Result<(), String> {
     let blob = crate::vm::interpreter::flatten_param_vec(ordered_params);
@@ -75,91 +58,88 @@ pub fn check_witness_manifest(
             manifest.entry_blob_field_count
         ));
     }
-    let check = |what: &str, column_start: usize, blob_offset: usize, len: usize| {
-        for j in 0..len {
-            let column = column_start + j;
-            let expected = blob.get(blob_offset + j).ok_or_else(|| {
-                format!(
-                    "{what}: blob slot {} is past the end of the inputs",
-                    blob_offset + j
-                )
-            })?;
-            match wit_pre_comm.get(column) {
-                Some(actual) if actual == expected => {}
-                Some(actual) => {
-                    return Err(format!(
-                        "{what}: witness[{column}] holds {actual} but entry blob slot {} is \
-                         {expected}",
-                        blob_offset + j
-                    ));
-                }
-                None => {
-                    return Err(format!(
-                        "{what}: witness has no column {column} (pre-commitment witness has {} \
-                         values)",
-                        wit_pre_comm.len()
-                    ));
-                }
-            }
-        }
-        Ok(())
-    };
     for param in &manifest.parameters {
         if let Some(start) = param.column_start {
-            check(
+            let fields = blob
+                .get(param.blob_offset..param.blob_offset + param.width)
+                .ok_or_else(|| {
+                    format!(
+                        "parameter `{}`: blob slots {}.. are past the end of the inputs",
+                        param.name, param.blob_offset
+                    )
+                })?;
+            check_columns(
                 &format!("parameter `{}`", param.name),
+                "the entry blob",
+                fields,
                 start,
-                param.blob_offset,
-                param.width,
+                wit_pre_comm,
             )?;
         }
     }
-    let mut blob_offset: usize = manifest.parameters.iter().map(|param| param.width).sum();
-    if let Some(guard) = manifest.guard_column {
-        check("return guard", guard, blob_offset, 1)?;
-        blob_offset += 1;
-    }
-    if let Some(ret) = manifest.returns {
-        check("declared return", ret.column_start, blob_offset, ret.len)?;
+    if let Some(declared) = declared_return {
+        check_declared_return(manifest, declared, wit_pre_comm)?;
     }
     Ok(())
 }
 
-pub fn flattened_io_count(abi: &noirc_abi::Abi) -> usize {
-    let returns = abi
-        .return_type
-        .as_ref()
-        .map_or(0, |ret| 1 + ret.abi_type.field_count() as usize);
-    abi.field_count() as usize + returns
-}
-
-fn field_param(value: u64) -> InputValueOrdered {
-    InputValueOrdered::Field(ark_bn254::Fr::from(value)) // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
-}
-
-fn zero_param(abi_type: &AbiType) -> InputValueOrdered {
-    match abi_type {
-        AbiType::Array { typ, length } => {
-            InputValueOrdered::Vec((0..*length).map(|_| zero_param(typ)).collect())
-        }
-        AbiType::Struct { fields, .. } => InputValueOrdered::Struct(
-            fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), zero_param(ty)))
-                .collect(),
-        ),
-        AbiType::Tuple { fields } => InputValueOrdered::Struct(
-            fields
-                .iter()
-                .enumerate()
-                .map(|(idx, ty)| (idx.to_string(), zero_param(ty)))
-                .collect(),
-        ),
-        AbiType::String { length } => {
-            InputValueOrdered::Vec((0..*length).map(|_| field_param(0)).collect())
-        }
-        _ => field_param(0),
+/// `manifest` must already be validated against the R1CS.
+pub fn check_declared_return(
+    manifest: &WitnessManifest,
+    declared_return: &InputValueOrdered,
+    wit_pre_comm: &[mavros_artifacts::Field],
+) -> Result<(), String> {
+    let Some(ret) = manifest.returns else {
+        return Err(format!(
+            "declared return: the inputs declare `{MAIN_RETURN_NAME}` but the program has no return"
+        ));
+    };
+    let declared = crate::vm::interpreter::flatten_param_vec(std::slice::from_ref(declared_return));
+    if declared.len() != ret.len {
+        return Err(format!(
+            "declared return: `{MAIN_RETURN_NAME}` flattens to {} fields but the return has {}",
+            declared.len(),
+            ret.len
+        ));
     }
+    match ret.column_start {
+        Some(start) => check_columns(
+            "declared return",
+            &format!("`{MAIN_RETURN_NAME}`"),
+            &declared,
+            start,
+            wit_pre_comm,
+        ),
+        None => Ok(()),
+    }
+}
+
+fn check_columns(
+    what: &str,
+    source: &str,
+    expected: &[mavros_artifacts::Field],
+    column_start: usize,
+    wit_pre_comm: &[mavros_artifacts::Field],
+) -> Result<(), String> {
+    for (j, expected) in expected.iter().enumerate() {
+        let column = column_start + j;
+        match wit_pre_comm.get(column) {
+            Some(actual) if actual == expected => {}
+            Some(actual) => {
+                return Err(format!(
+                    "{what}: witness[{column}] holds {actual} but {source} is {expected}"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "{what}: witness has no column {column} (pre-commitment witness has {} \
+                     values)",
+                    wit_pre_comm.len()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn ordered_param(abi_type: &AbiType, value: &InputValue) -> Result<InputValueOrdered, String> {
@@ -240,7 +220,11 @@ mod tests {
                 .map(|name| AbiParameter {
                     name: (*name).to_string(),
                     typ: string.clone(),
-                    visibility: AbiVisibility::Private,
+                    visibility: if name.starts_with("pub_") {
+                        AbiVisibility::Public
+                    } else {
+                        AbiVisibility::Private
+                    },
                 })
                 .collect(),
             return_type: has_return.then(|| AbiReturnType {
@@ -248,19 +232,6 @@ mod tests {
                 visibility: AbiVisibility::Public,
             }),
             error_types: Default::default(),
-        }
-    }
-
-    fn guard_value(params: &[InputValueOrdered], index: usize) -> u64 {
-        match &params[index] {
-            InputValueOrdered::Field(f) => {
-                if *f == ark_bn254::Fr::from(0u64) {
-                    0
-                } else {
-                    1
-                }
-            }
-            other => panic!("guard slot is not a field: {other:?}"),
         }
     }
 
@@ -275,33 +246,32 @@ mod tests {
     }
 
     #[test]
-    fn missing_return_key_sets_guard_to_zero_and_zero_fills() {
-        let abi = string_abi(&[], true);
-        let params = ordered_params_from_btreemap(&abi, &BTreeMap::new()).unwrap();
-        // Guard slot, then the zero-filled two-field declared return.
-        assert_eq!(params.len(), 2);
-        assert_eq!(guard_value(&params, 0), 0);
-        assert_eq!(
-            params[1],
-            InputValueOrdered::Vec(vec![
-                InputValueOrdered::Field(ark_bn254::Fr::from(0u64)),
-                InputValueOrdered::Field(ark_bn254::Fr::from(0u64)),
-            ])
-        );
-    }
-
-    #[test]
-    fn supplied_return_key_sets_guard_to_one() {
+    fn the_return_is_not_an_input() {
         let abi = string_abi(&[], true);
         let inputs = BTreeMap::from([(
             MAIN_RETURN_NAME.to_string(),
             InputValue::String("ab".to_string()),
         )]);
-        let params = ordered_params_from_btreemap(&abi, &inputs).unwrap();
-        assert_eq!(params.len(), 2);
-        assert_eq!(guard_value(&params, 0), 1);
+        assert_eq!(ordered_params_from_btreemap(&abi, &inputs).unwrap(), vec![]);
+        assert_eq!(
+            declared_return_from_btreemap(&abi, &BTreeMap::new()).unwrap(),
+            None
+        );
+        assert_eq!(
+            declared_return_from_btreemap(&abi, &inputs).unwrap(),
+            Some(InputValueOrdered::Vec(vec![
+                InputValueOrdered::Field(ark_bn254::Fr::from(b'a' as u64)),
+                InputValueOrdered::Field(ark_bn254::Fr::from(b'b' as u64)),
+            ]))
+        );
+        let no_return = string_abi(&[], false);
+        assert_eq!(
+            declared_return_from_btreemap(&no_return, &inputs).unwrap(),
+            None
+        );
     }
 
+    /// `fn main(x: str<2>, pub_y: pub str<2>) -> pub str<2>`: columns `[1, y, x, ..., ret]`.
     fn string_manifest(abi: &Abi) -> WitnessManifest {
         use mavros_artifacts::{ManifestParam, ParamVisibility, ReturnSlot};
         let parameters = abi
@@ -317,69 +287,70 @@ mod tests {
                 },
                 blob_offset: 2 * i,
                 width: 2,
-                column_start: Some(1 + 2 * i),
+                column_start: Some(if param.visibility == AbiVisibility::Public {
+                    1
+                } else {
+                    3
+                }),
             })
             .collect::<Vec<_>>();
-        let after_params = 2 * parameters.len();
         WitnessManifest {
-            entry_blob_field_count: after_params + 3,
+            entry_blob_field_count: 4,
             parameters,
-            guard_column: Some(1 + after_params),
             returns: Some(ReturnSlot {
-                column_start: 2 + after_params,
+                column_start: Some(6),
                 len: 2,
                 visibility: ParamVisibility::Public,
             }),
             challenges: vec![],
-            pre_commitment_size: after_params + 5,
-            witness_count: after_params + 5,
+            pre_commitment_size: 8,
+            witness_count: 8,
             constraint_count: 0,
         }
     }
 
     #[test]
     fn witness_manifest_check_compares_every_named_column() {
-        let abi = string_abi(&["x", "y"], true);
+        let abi = string_abi(&["x", "pub_y"], true);
         let inputs = BTreeMap::from([
             ("x".to_string(), InputValue::String("ab".to_string())),
-            ("y".to_string(), InputValue::String("cd".to_string())),
+            ("pub_y".to_string(), InputValue::String("cd".to_string())),
             (
                 MAIN_RETURN_NAME.to_string(),
                 InputValue::String("ef".to_string()),
             ),
         ]);
         let params = ordered_params_from_btreemap(&abi, &inputs).unwrap();
+        let declared = declared_return_from_btreemap(&abi, &inputs).unwrap();
         let manifest = string_manifest(&abi);
         let field = |byte: u8| ark_bn254::Fr::from(byte as u64);
-        // witness[0] = 1, then x, y, guard = 1, return.
+        // witness[0] = 1, then the public y, the private x, an internal column, the return.
         let mut witness = vec![ark_bn254::Fr::from(1u64)];
-        witness.extend(b"abcd".iter().map(|b| field(*b)));
-        witness.push(ark_bn254::Fr::from(1u64));
-        witness.extend(b"ef".iter().map(|b| field(*b)));
+        witness.extend(b"cdab".iter().map(|b| field(*b)));
         witness.push(ark_bn254::Fr::from(99u64));
-        assert_eq!(check_witness_manifest(&manifest, &params, &witness), Ok(()));
-
+        witness.extend(b"ef".iter().map(|b| field(*b)));
+        let check = |declared: Option<&InputValueOrdered>, witness: &[ark_bn254::Fr]| {
+            check_witness_manifest(&manifest, &params, declared, witness)
+        };
+        assert_eq!(check(declared.as_ref(), &witness), Ok(()));
         let mut wrong = witness.clone();
-        wrong[3] = field(b'z');
-        let error = check_witness_manifest(&manifest, &params, &wrong).unwrap_err();
+        wrong[1] = field(b'z');
+        let error = check(declared.as_ref(), &wrong).unwrap_err();
         assert!(
-            error.contains("parameter `y`") && error.contains("witness[3]"),
+            error.contains("parameter `pub_y`") && error.contains("witness[1]"),
             "{error}"
         );
 
         let mut wrong = witness.clone();
-        wrong[5] = ark_bn254::Fr::from(0u64);
-        let error = check_witness_manifest(&manifest, &params, &wrong).unwrap_err();
-        assert!(error.contains("return guard"), "{error}");
-        let mut wrong = witness.clone();
         wrong.swap(6, 7);
-        let error = check_witness_manifest(&manifest, &params, &wrong).unwrap_err();
+        let error = check(declared.as_ref(), &wrong).unwrap_err();
         assert!(error.contains("declared return"), "{error}");
+        assert_eq!(check(None, &wrong), Ok(()));
 
-        let error = check_witness_manifest(&manifest, &params, &witness[..4]).unwrap_err();
+        let error = check(declared.as_ref(), &witness[..4]).unwrap_err();
         assert!(error.contains("no column"), "{error}");
 
-        let error = check_witness_manifest(&manifest, &params[..1], &witness).unwrap_err();
+        let error = check_witness_manifest(&manifest, &params[..1], None, &witness).unwrap_err();
         assert!(error.contains("entry blob"), "{error}");
     }
 }
