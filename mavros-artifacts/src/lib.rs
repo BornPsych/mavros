@@ -1,14 +1,15 @@
 pub mod field;
 pub mod manifest;
 
-use std::{collections::BTreeMap, fmt::Display};
+use std::{collections::BTreeMap, fmt::Display, ops::Deref};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest as _, Sha256};
 use tracing::error;
 
 pub use field::{FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement, MavrosField};
 pub use manifest::{
-    ArtifactError, ChallengeSlot, ENTRY_BLOB_COLUMN_BASE, ManifestParam, ParamVisibility,
+    ArtifactError, ChallengeSlot, ManifestParam, ParamVisibility, R1CS_ARTIFACT_DIGEST_DOMAIN,
     R1CS_ARTIFACT_FORMAT_VERSION, R1CS_ARTIFACT_MAGIC, R1CSArtifact, ReturnSlot, WitnessManifest,
 };
 
@@ -346,15 +347,15 @@ mod lc_serde {
         D: Deserializer<'de>,
     {
         let converted: Vec<(usize, F::Limbs)> = Deserialize::deserialize(deserializer)?;
-        Ok(converted
+        converted
             .into_iter()
             .map(|(idx, limbs)| {
-                (
-                    idx,
-                    F::from_canonical_limbs(limbs.as_ref()).expect("Invalid field element"),
-                )
+                let coeff = F::from_canonical_limbs(limbs.as_ref()).ok_or_else(|| {
+                    serde::de::Error::custom("coefficient is not a canonical field element")
+                })?;
+                Ok((idx, coeff))
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -460,10 +461,9 @@ impl TableKind {
 // Witness & constraints layout
 // ---------------------------------------------------------------------------
 
+/// Witness section sizes. [`WitnessManifest`] records parameter and return positions.
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct WitnessLayout {
-    pub guard_index: Option<usize>,
-    pub return_len: usize,
     pub algebraic_size: usize,
     pub multiplicities_size: usize,
 
@@ -587,6 +587,63 @@ fn evaluate<F: MavrosField>(terms: &[(usize, F)], witness: &[F]) -> F {
     terms
         .iter()
         .fold(F::ZERO, |sum, (i, coeff)| sum + *coeff * witness[*i])
+}
+
+/// Domain separator of [`R1CS::digest`]; bump it when the preimage encoding changes.
+pub const R1CS_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-digest-v1\0";
+
+/// The `u32` tag naming `field` in the artifact header and in digests.
+pub fn field_tag(field: FieldId) -> u32 {
+    u32::try_from(field.code()).expect("field codes fit in u32")
+}
+
+impl<F: MavrosField> R1CS<F> {
+    /// SHA-256 over [`R1CS_DIGEST_DOMAIN`], the field tag (`u32` LE) and the bincode encoding of
+    /// this system: every layout and every coefficient. The same system over another field hashes
+    /// differently.
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(R1CS_DIGEST_DOMAIN);
+        hasher.update(field_tag(F::ID).to_le_bytes());
+        bincode::serialize_into(&mut hasher, self)
+            .expect("hashing an R1CS cannot fail: the hasher accepts every byte");
+        hasher.finalize().into()
+    }
+}
+
+/// A constraint system frozen under its field-bound digest; derefs to the [`R1CS`].
+#[derive(Clone, Debug)]
+pub struct SealedR1CS<F: MavrosField = Field> {
+    system: R1CS<F>,
+    digest: [u8; 32],
+}
+
+impl<F: MavrosField> Deref for SealedR1CS<F> {
+    type Target = R1CS<F>;
+
+    fn deref(&self) -> &R1CS<F> {
+        &self.system
+    }
+}
+
+impl<F: MavrosField> SealedR1CS<F> {
+    pub fn new(system: R1CS<F>) -> Self {
+        let digest = system.digest();
+        Self { system, digest }
+    }
+
+    pub fn field(&self) -> FieldId {
+        F::ID
+    }
+
+    /// Use [`R1CSArtifact::digest`] to also bind the witness manifest.
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    pub fn system(&self) -> &R1CS<F> {
+        &self.system
+    }
 }
 
 impl<F: MavrosField> R1CS<F> {

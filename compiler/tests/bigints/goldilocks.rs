@@ -77,13 +77,7 @@ fn assert_returns(
     *block.last_mut().unwrap() = wrong;
     let verdict = compiled.run(&block);
     assert!(
-        matches!(
-            verdict,
-            Verdict::Trapped {
-                in_return_check: true,
-                ..
-            }
-        ),
+        matches!(verdict, Verdict::ReturnMismatch { .. }),
         "{what}: a wrong return gave {verdict:?}"
     );
 }
@@ -204,7 +198,7 @@ fn sweep(kind: BinaryArithOpKind, bits: usize) {
         .iter()
         .find(|(lhs, rhs)| mavros_int_semantics::eval(op, lhs, rhs).value().is_some())
         .expect("the model accepts a corner pair");
-    if let Err(unconstrained) = oracle.check_a_wrong_answer_is_refused(&accepted.0, &accepted.1) {
+    if let Err(unconstrained) = oracle.check_wrong_return_is_reported(&accepted.0, &accepted.1) {
         panic!("Goldilocks: {unconstrained}");
     }
 }

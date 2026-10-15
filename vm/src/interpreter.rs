@@ -469,7 +469,8 @@ fn run_phase1_impl<F: mavros_artifacts::MavrosField>(
         inputs.len(),
         header.entry_blob_field_count,
     );
-    // The program itself writes inputs to the witness tape via pinned WriteWitness instructions.
+    // The program itself writes inputs to the witness tape via pinned WriteWitness instructions,
+    // public parameters first.
     let out_wit_post_comm = vec![F::ZERO; witness_layout.post_commitment_size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(
@@ -1242,8 +1243,6 @@ mod tests {
     /// The layouts [`every_table_program`] fills exactly.
     fn every_table_layouts() -> (WitnessLayout, ConstraintsLayout) {
         let witness_layout = WitnessLayout {
-            guard_index: None,
-            return_len: 0,
             algebraic_size: 3,
             multiplicities_size: 11,
             challenges_size: 2,
@@ -1436,8 +1435,6 @@ mod tests {
     /// Layouts with no witnesses, and `constraints` algebraic constraints.
     fn empty_layouts(constraints: usize) -> (WitnessLayout, ConstraintsLayout) {
         let witness_layout = WitnessLayout {
-            guard_index: None,
-            return_len: 0,
             algebraic_size: 0,
             multiplicities_size: 0,
             challenges_size: 0,
@@ -1580,13 +1577,13 @@ mod tests {
             message: None,
             stack_trace: vec![bytecode::StackFrame {
                 function: "wrapper_main".to_string(),
-                location: bytecode::SourceLocation::new("<public return value check>", 1, 1),
+                location: bytecode::SourceLocation::new("<entry point: return>", 1, 1),
             }],
         };
 
         assert_eq!(
             error.to_string(),
-            "VM trapped during execution\n  at wrapper_main (<public return value check>)"
+            "VM trapped during execution\n  at wrapper_main (<entry point: return>)"
         );
     }
 }
