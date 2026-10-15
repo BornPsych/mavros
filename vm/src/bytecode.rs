@@ -5525,8 +5525,6 @@ mod tests {
             if value < 0 { -magnitude } else { magnitude }
         };
         let witness_layout = WitnessLayout {
-            guard_index: None,
-            return_len: 0,
             algebraic_size: 8,
             multiplicities_size: 16,
             challenges_size: 2,
