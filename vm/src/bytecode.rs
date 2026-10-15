@@ -3876,13 +3876,11 @@ pub const NO_ENTRY_POINT: usize = usize::MAX;
 
 /// Buffer layouts bound to the compiled constraint traversal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConstraintLayouts([u64; 10]);
+pub struct ConstraintLayouts([u64; 8]);
 
 impl ConstraintLayouts {
     pub fn new(witness: WitnessLayout, constraints: ConstraintsLayout) -> Self {
         Self([
-            witness.guard_index.map_or(u64::MAX, |index| index as u64),
-            witness.return_len as u64,
             witness.algebraic_size as u64,
             witness.multiplicities_size as u64,
             witness.challenges_size as u64,
@@ -4106,8 +4104,8 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
     let (constraint_layouts, off) = match program[3] {
         0 => (None, 4),
         1 => (
-            Some(ConstraintLayouts(program[4..14].try_into().unwrap())),
-            14,
+            Some(ConstraintLayouts(program[4..12].try_into().unwrap())),
+            12,
         ),
         _ => panic!("invalid constraint layout tag"),
     };
@@ -5799,8 +5797,6 @@ mod tests {
             if value < 0 { -magnitude } else { magnitude }
         };
         let witness_layout = WitnessLayout {
-            guard_index: None,
-            return_len: 0,
             algebraic_size: 8,
             multiplicities_size: 16,
             challenges_size: 2,

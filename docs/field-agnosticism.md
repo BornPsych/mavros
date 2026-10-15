@@ -246,8 +246,8 @@ stays raw by design until P5. By file (count):
 - [ ] `wasm-runtime/src/lib.rs` (1) — the `field_runtime!` invocation's `ark_bn254::Fr` (see
       L3-llstruct).
 - [ ] `compiler/src/api.rs` (1) — `Fr::rand` input setup. Raw, feeds the VM.
-- [ ] `compiler/src/abi_helpers.rs` (5) — `Fr::from(..)` ABI decode and return-guard synthesis. Raw,
-      feeds the VM.
+- [ ] `compiler/src/abi_helpers.rs` (7) — `Fr::from(..)` ABI string decode and its tests. Raw, feeds
+      the VM.
 
 ### `L1-serde` — artifact/ABI serialization pinned to `[u64;4]` (representation, P5 — done)
 
