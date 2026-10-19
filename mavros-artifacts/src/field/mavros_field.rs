@@ -32,7 +32,7 @@ use ark_ff::{AdditiveGroup, BigInt, PrimeField};
 
 /// Identifies one of Mavros' supported fields.
 ///
-/// Bytecode names its field by opcode identity, so only the `r1cs.bin` header encodes it, as the
+/// Bytecode names its field by opcode identity, so only the artifact header encodes it, as the
 /// `u32` tag [`FieldId::code`] gives. Decoding must go through the checked [`FieldId::from_code`]:
 /// casting an untrusted `u32` straight into the enum would be undefined behaviour for an unknown
 /// value. It selects per-field behaviour in the compiler through exhaustive matches, so a new
@@ -44,7 +44,7 @@ pub enum FieldId {
 }
 
 impl FieldId {
-    /// The wire encoding in the `r1cs.bin` header: the enum discriminant.
+    /// The wire encoding in the artifact header: the enum discriminant.
     #[must_use]
     pub fn code(self) -> u32 {
         self as u32

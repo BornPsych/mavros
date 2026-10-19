@@ -989,9 +989,20 @@ impl Driver {
         Ok(manifest)
     }
 
-    pub fn r1cs_artifact(&self, r1cs: SealedR1CS) -> Result<Artifact, Error> {
+    pub fn artifact(
+        &self,
+        r1cs: SealedR1CS,
+        bytecode: Vec<u64>,
+        abi: Vec<u8>,
+    ) -> Result<Artifact, Error> {
         let manifest = self.witness_manifest(&r1cs)?;
-        Ok(Artifact::new(manifest, r1cs))
+        Ok(Artifact::new(
+            manifest,
+            r1cs,
+            bytecode,
+            abi,
+            env!("CARGO_PKG_VERSION").to_string(),
+        ))
     }
 
     /// The parameters only; the return is computed, not an input.

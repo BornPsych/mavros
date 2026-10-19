@@ -623,7 +623,7 @@ impl SealedR1CS {
         self.field
     }
 
-    /// Use [`Artifact::digest`] to also bind the witness manifest.
+    /// Use [`Artifact::digest`] to also bind the witness manifest, bytecode and ABI.
     pub fn digest(&self) -> [u8; 32] {
         self.digest
     }
