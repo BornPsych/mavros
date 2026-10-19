@@ -6,7 +6,7 @@
 //! ```
 //!
 //! The digest binds the field, R1CS and witness manifest; reading verifies it.
-//! Bump [`R1CS_ARTIFACT_FORMAT_VERSION`] when changing the header, the serialized manifest, the
+//! Bump [`ARTIFACT_FORMAT_VERSION`] when changing the header, the serialized manifest, the
 //! R1CS or the layouts.
 //!
 //! The entry blob holds the parameters only, in ABI order. Witness columns follow the wrapper's
@@ -173,14 +173,14 @@ impl WitnessManifest {
     }
 }
 
-pub const R1CS_ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
+pub const ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
 /// Format version this crate writes and the only one it reads.
-pub const R1CS_ARTIFACT_FORMAT_VERSION: u32 = 1;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
 
-/// Domain separator of [`R1CSArtifact::digest`]. Bump when its preimage encoding changes.
-pub const R1CS_ARTIFACT_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-artifact-v1\0";
+/// Domain separator of [`Artifact::digest`]. Bump when its preimage encoding changes.
+pub const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-artifact-v1\0";
 
-const VERSION_OFFSET: usize = R1CS_ARTIFACT_MAGIC.len();
+const VERSION_OFFSET: usize = ARTIFACT_MAGIC.len();
 const FIELD_OFFSET: usize = VERSION_OFFSET + 4;
 const DIGEST_OFFSET: usize = FIELD_OFFSET + 4;
 const HEADER_LEN: usize = DIGEST_OFFSET + 32;
@@ -189,7 +189,7 @@ const HEADER_LEN: usize = DIGEST_OFFSET + 32;
 pub enum ArtifactError {
     #[error("r1cs.bin does not start with the MAVR1CS header, so it is not a Mavros R1CS artifact")]
     MissingHeader,
-    #[error("unsupported r1cs.bin format version {0}; expected {R1CS_ARTIFACT_FORMAT_VERSION}")]
+    #[error("unsupported r1cs.bin format version {0}; expected {ARTIFACT_FORMAT_VERSION}")]
     UnsupportedVersion(u32),
     #[error("r1cs.bin names unknown field {0}")]
     UnknownField(u32),
@@ -220,16 +220,16 @@ struct BodyRef<'a> {
 }
 
 #[derive(Debug)]
-pub struct R1CSArtifact {
+pub struct Artifact {
     manifest: WitnessManifest,
     r1cs: SealedR1CS,
     digest: [u8; 32],
 }
 
-impl R1CSArtifact {
+impl Artifact {
     pub fn new(manifest: WitnessManifest, r1cs: SealedR1CS) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(R1CS_ARTIFACT_DIGEST_DOMAIN);
+        hasher.update(ARTIFACT_DIGEST_DOMAIN);
         hasher.update(r1cs.digest());
         bincode::serialize_into(&mut hasher, &manifest)
             .expect("hashing a witness manifest cannot fail: the hasher accepts every byte");
@@ -244,7 +244,7 @@ impl R1CSArtifact {
         self.r1cs.field()
     }
 
-    /// SHA-256 over [`R1CS_ARTIFACT_DIGEST_DOMAIN`], the field-bound [`R1CS::digest`] and the
+    /// SHA-256 over [`ARTIFACT_DIGEST_DOMAIN`], the field-bound [`R1CS::digest`] and the
     /// bincode-encoded manifest. Pin this digest to identify both the system and its public
     /// input/output mapping; [`SealedR1CS::digest`] identifies only the constraint system.
     pub fn digest(&self) -> [u8; 32] {
@@ -265,8 +265,8 @@ impl R1CSArtifact {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, ArtifactError> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&R1CS_ARTIFACT_MAGIC);
-        bytes.extend_from_slice(&R1CS_ARTIFACT_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&ARTIFACT_MAGIC);
+        bytes.extend_from_slice(&ARTIFACT_FORMAT_VERSION.to_le_bytes());
         bytes.extend_from_slice(&self.field().code().to_le_bytes());
         bytes.extend_from_slice(&self.digest());
         debug_assert_eq!(bytes.len(), HEADER_LEN);
@@ -282,13 +282,13 @@ impl R1CSArtifact {
 
     /// Reads an artifact, verifying its digest and the manifest against the R1CS.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArtifactError> {
-        if bytes.len() < HEADER_LEN || bytes[..R1CS_ARTIFACT_MAGIC.len()] != R1CS_ARTIFACT_MAGIC {
+        if bytes.len() < HEADER_LEN || bytes[..ARTIFACT_MAGIC.len()] != ARTIFACT_MAGIC {
             return Err(ArtifactError::MissingHeader);
         }
         let u32_at =
             |start: usize| u32::from_le_bytes(bytes[start..start + 4].try_into().expect("4 bytes"));
         let version = u32_at(VERSION_OFFSET);
-        if version != R1CS_ARTIFACT_FORMAT_VERSION {
+        if version != ARTIFACT_FORMAT_VERSION {
             return Err(ArtifactError::UnsupportedVersion(version));
         }
         let field_code = u32_at(FIELD_OFFSET);
@@ -375,13 +375,13 @@ mod tests {
     }
 
     fn bytes_of(manifest: WitnessManifest, r1cs: R1CS) -> Vec<u8> {
-        R1CSArtifact::new(manifest, SealedR1CS::new(r1cs, FieldId::Bn254))
+        Artifact::new(manifest, SealedR1CS::new(r1cs, FieldId::Bn254))
             .to_bytes()
             .unwrap()
     }
 
-    fn round_trip(manifest: WitnessManifest, r1cs: R1CS) -> Result<R1CSArtifact, ArtifactError> {
-        R1CSArtifact::from_bytes(&bytes_of(manifest, r1cs))
+    fn round_trip(manifest: WitnessManifest, r1cs: R1CS) -> Result<Artifact, ArtifactError> {
+        Artifact::from_bytes(&bytes_of(manifest, r1cs))
     }
 
     #[test]
@@ -409,13 +409,13 @@ mod tests {
             let (mut m, mut r) = (manifest(), r1cs());
             mutate(&mut m, &mut r);
             let bytes = bytes_of(m.clone(), r.clone());
-            assert!(bytes.starts_with(&R1CS_ARTIFACT_MAGIC));
+            assert!(bytes.starts_with(&ARTIFACT_MAGIC));
             assert_eq!(
                 bytes,
                 bytes_of(m.clone(), r.clone()),
                 "serialization is deterministic"
             );
-            let decoded = R1CSArtifact::from_bytes(&bytes).unwrap();
+            let decoded = Artifact::from_bytes(&bytes).unwrap();
             assert_eq!(decoded.field(), FieldId::Bn254);
             assert_eq!(decoded.r1cs().digest(), r.digest(FieldId::Bn254));
             assert_eq!(&bytes[DIGEST_OFFSET..HEADER_LEN], &decoded.digest());
@@ -432,26 +432,25 @@ mod tests {
     #[test]
     fn artifact_rejects_invalid_headers() {
         assert!(matches!(
-            R1CSArtifact::from_bytes(&[]),
+            Artifact::from_bytes(&[]),
             Err(ArtifactError::MissingHeader)
         ));
         let mut bytes = bytes_of(manifest(), r1cs());
         assert!(matches!(
-            R1CSArtifact::from_bytes(&bytes[..HEADER_LEN - 1]),
+            Artifact::from_bytes(&bytes[..HEADER_LEN - 1]),
             Err(ArtifactError::MissingHeader)
         ));
-        for version in [0, R1CS_ARTIFACT_FORMAT_VERSION + 1] {
+        for version in [0, ARTIFACT_FORMAT_VERSION + 1] {
             bytes[VERSION_OFFSET..FIELD_OFFSET].copy_from_slice(&version.to_le_bytes());
             assert!(matches!(
-                R1CSArtifact::from_bytes(&bytes),
+                Artifact::from_bytes(&bytes),
                 Err(ArtifactError::UnsupportedVersion(found)) if found == version
             ));
         }
-        bytes[VERSION_OFFSET..FIELD_OFFSET]
-            .copy_from_slice(&R1CS_ARTIFACT_FORMAT_VERSION.to_le_bytes());
+        bytes[VERSION_OFFSET..FIELD_OFFSET].copy_from_slice(&ARTIFACT_FORMAT_VERSION.to_le_bytes());
         bytes[FIELD_OFFSET..DIGEST_OFFSET].copy_from_slice(&99u32.to_le_bytes());
         assert!(matches!(
-            R1CSArtifact::from_bytes(&bytes),
+            Artifact::from_bytes(&bytes),
             Err(ArtifactError::UnknownField(99))
         ));
     }
@@ -535,7 +534,7 @@ mod tests {
             hex(&r1cs().digest(FieldId::Bn254)),
             "a00d2ffcd12de9ef9b7642233971e38e1bb2edd7771436a9e85412471d1bb795"
         );
-        let artifact = R1CSArtifact::new(manifest(), SealedR1CS::new(r1cs(), FieldId::Bn254));
+        let artifact = Artifact::new(manifest(), SealedR1CS::new(r1cs(), FieldId::Bn254));
         assert_eq!(
             hex(&artifact.digest()),
             "dc87920b5ff99db926f5baf53d52421e03c5870fecb94fb72a3a36672aaef7c8"
@@ -550,7 +549,7 @@ mod tests {
         let rejects = |bytes: &[u8], case: &str| {
             assert!(
                 matches!(
-                    R1CSArtifact::from_bytes(bytes),
+                    Artifact::from_bytes(bytes),
                     Err(ArtifactError::DigestMismatch { .. })
                 ),
                 "{case}"
@@ -614,7 +613,7 @@ mod tests {
         let mut bytes = honest.clone();
         bytes[at..at + limbs.len()].copy_from_slice(&limbs);
         assert!(matches!(
-            R1CSArtifact::from_bytes(&bytes),
+            Artifact::from_bytes(&bytes),
             Err(ArtifactError::Body(_))
         ));
     }

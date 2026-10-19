@@ -10,8 +10,8 @@ use tracing::error;
 
 pub use field::{FieldConfig, FieldElement, FieldId, MavrosField};
 pub use manifest::{
-    ArtifactError, ChallengeSlot, ManifestParam, ParamVisibility, R1CS_ARTIFACT_DIGEST_DOMAIN,
-    R1CS_ARTIFACT_FORMAT_VERSION, R1CS_ARTIFACT_MAGIC, R1CSArtifact, ReturnSlot, WitnessManifest,
+    ARTIFACT_DIGEST_DOMAIN, ARTIFACT_FORMAT_VERSION, ARTIFACT_MAGIC, Artifact, ArtifactError,
+    ChallengeSlot, ManifestParam, ParamVisibility, ReturnSlot, WitnessManifest,
 };
 
 // FIELD-ASSUMPTION: L1-alias
@@ -623,7 +623,7 @@ impl SealedR1CS {
         self.field
     }
 
-    /// Use [`R1CSArtifact::digest`] to also bind the witness manifest.
+    /// Use [`Artifact::digest`] to also bind the witness manifest.
     pub fn digest(&self) -> [u8; 32] {
         self.digest
     }
