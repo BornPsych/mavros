@@ -100,7 +100,7 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
   constants through `FieldConfig` (`constant` takes `IntoFieldElement`), which refuses an element of
   another field.
 - **The VM** carries `goldilocks_*` copies of every field opcode in every build. A program binary
-  names its field in its header (format version 2), and a run over another field is refused.
+  names its field in its header (format version 3), and a run over another field is refused.
 - **The R1CS** is generic (`R1CS<F>`, with bn254 as the default): `Driver::generate_r1cs::<F>`
   refuses an `F` other than the program's field, `R1CGen<F>` converts constants with
   `MavrosField::from_element`, and a serialized coefficient is `F::CANONICAL_LIMBS` limbs.
@@ -605,7 +605,7 @@ non-native fields; neither is the Noir `Field` used to constrain their arithmeti
       later, benchmarked swap behind the façade impls only; Goldilocks is hand-written (Phase 5).
 - [x] **Program header** — `vm/src/bytecode.rs` (`to_binary`/`to_binary_impl` write it,
       `ProgramHeader`/`parse_program_header` read it) opens with `PROGRAM_MAGIC`,
-      `PROGRAM_FORMAT_VERSION` (2) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
+      `PROGRAM_FORMAT_VERSION` (3) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
       0 names none). Dispatch needs no field selection, since the opcodes name the field
       (`bn254_add_field`, …); the word lets `interpreter::run*::<F>` refuse, in every build, a
       program over another field, whose handlers would read and write the wrong element width.
