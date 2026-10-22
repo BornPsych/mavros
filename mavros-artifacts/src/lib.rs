@@ -1,7 +1,7 @@
 pub mod field;
 pub mod manifest;
 
-use std::{collections::BTreeMap, fmt::Display, ops::Deref};
+use std::{collections::BTreeMap, fmt::Display, ops::Deref, sync::OnceLock};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
@@ -9,7 +9,7 @@ use tracing::error;
 
 pub use field::{FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement, MavrosField};
 pub use manifest::{
-    ArtifactError, ChallengeSlot, ManifestParam, ParamVisibility, R1CS_ARTIFACT_DIGEST_DOMAIN,
+    ArtifactError, ManifestParam, ParamVisibility, R1CS_ARTIFACT_DIGEST_DOMAIN,
     R1CS_ARTIFACT_FORMAT_VERSION, R1CS_ARTIFACT_MAGIC, R1CSArtifact, ReturnSlot, WitnessManifest,
 };
 
@@ -611,11 +611,11 @@ impl<F: MavrosField> R1CS<F> {
     }
 }
 
-/// A constraint system frozen under its field-bound digest; derefs to the [`R1CS`].
+/// An immutable constraint system; derefs to the [`R1CS`]. Its digest is computed on first use.
 #[derive(Clone, Debug)]
 pub struct SealedR1CS<F: MavrosField = Field> {
     system: R1CS<F>,
-    digest: [u8; 32],
+    digest: OnceLock<[u8; 32]>,
 }
 
 impl<F: MavrosField> Deref for SealedR1CS<F> {
@@ -628,8 +628,10 @@ impl<F: MavrosField> Deref for SealedR1CS<F> {
 
 impl<F: MavrosField> SealedR1CS<F> {
     pub fn new(system: R1CS<F>) -> Self {
-        let digest = system.digest();
-        Self { system, digest }
+        Self {
+            system,
+            digest: OnceLock::new(),
+        }
     }
 
     pub fn field(&self) -> FieldId {
@@ -638,7 +640,7 @@ impl<F: MavrosField> SealedR1CS<F> {
 
     /// Use [`R1CSArtifact::digest`] to also bind the witness manifest.
     pub fn digest(&self) -> [u8; 32] {
-        self.digest
+        *self.digest.get_or_init(|| self.system.digest())
     }
 
     pub fn system(&self) -> &R1CS<F> {

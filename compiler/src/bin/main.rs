@@ -1178,28 +1178,20 @@ mod tests {
         let bytes = fs::read(&r1cs).unwrap();
         let artifact: R1CSArtifact = R1CSArtifact::from_bytes(&bytes).unwrap();
         let manifest = artifact.manifest();
-        assert_eq!(manifest.entry_blob_field_count, 8);
+        assert_eq!(manifest.entry_blob_field_count(), 8);
         let columns: Vec<_> = manifest
             .parameters
             .iter()
-            .map(|p| {
-                (
-                    p.name.as_str(),
-                    p.visibility,
-                    p.blob_offset,
-                    p.column_start,
-                    p.width,
-                )
-            })
+            .map(|p| (p.name.as_str(), p.visibility, p.column_start, p.width))
             .collect();
         // The unused Field disappears; the u8 range check and partial array read retain columns.
         assert_eq!(
             columns,
             vec![
-                ("unused", ParamVisibility::Private, 0, None, 1),
-                ("unused_u8", ParamVisibility::Private, 1, Some(4), 1),
-                ("x", ParamVisibility::Private, 2, Some(5), 3),
-                ("y", ParamVisibility::Public, 5, Some(1), 3)
+                ("unused", ParamVisibility::Private, None, 1),
+                ("unused_u8", ParamVisibility::Private, Some(4), 1),
+                ("x", ParamVisibility::Private, Some(5), 3),
+                ("y", ParamVisibility::Public, Some(1), 3)
             ]
         );
         let ret = manifest.returns.unwrap();

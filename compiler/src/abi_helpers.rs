@@ -51,23 +51,21 @@ pub fn check_witness_manifest(
     wit_pre_comm: &[mavros_artifacts::Field],
 ) -> Result<(), String> {
     let blob = crate::vm::interpreter::flatten_param_vec(ordered_params);
-    if blob.len() != manifest.entry_blob_field_count {
+    let expected = manifest.entry_blob_field_count();
+    if blob.len() != expected {
         return Err(format!(
-            "inputs flatten to {} fields but the manifest expects an entry blob of {}",
-            blob.len(),
-            manifest.entry_blob_field_count
+            "inputs flatten to {} fields but the manifest expects an entry blob of {expected}",
+            blob.len()
         ));
     }
-    for param in &manifest.parameters {
+    for (param, slot) in manifest.blob_slots() {
         if let Some(start) = param.column_start {
-            let fields = blob
-                .get(param.blob_offset..param.blob_offset + param.width)
-                .ok_or_else(|| {
-                    format!(
-                        "parameter `{}`: blob slots {}.. are past the end of the inputs",
-                        param.name, param.blob_offset
-                    )
-                })?;
+            let fields = blob.get(slot.clone()).ok_or_else(|| {
+                format!(
+                    "parameter `{}`: blob slots {}.. are past the end of the inputs",
+                    param.name, slot.start
+                )
+            })?;
             check_columns(
                 &format!("parameter `{}`", param.name),
                 "the entry blob",
@@ -278,15 +276,13 @@ mod tests {
         let parameters = abi
             .parameters
             .iter()
-            .enumerate()
-            .map(|(i, param)| ManifestParam {
+            .map(|param| ManifestParam {
                 name: param.name.clone(),
                 visibility: if param.visibility == AbiVisibility::Public {
                     ParamVisibility::Public
                 } else {
                     ParamVisibility::Private
                 },
-                blob_offset: 2 * i,
                 width: 2,
                 column_start: Some(if param.visibility == AbiVisibility::Public {
                     1
@@ -296,17 +292,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         WitnessManifest {
-            entry_blob_field_count: 4,
             parameters,
             returns: Some(ReturnSlot {
                 column_start: Some(6),
                 len: 2,
                 visibility: ParamVisibility::Public,
             }),
-            challenges: vec![],
-            pre_commitment_size: 8,
-            witness_count: 8,
-            constraint_count: 0,
         }
     }
 

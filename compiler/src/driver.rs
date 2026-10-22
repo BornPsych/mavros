@@ -17,8 +17,8 @@ use noirc_frontend::{
 use tracing::info;
 
 use mavros_artifacts::{
-    ChallengeSlot, FieldConfig, FieldId, ManifestParam, MavrosField, ParamVisibility, R1CSArtifact,
-    ReturnSlot, WitnessManifest,
+    FieldConfig, FieldId, ManifestParam, MavrosField, ParamVisibility, R1CSArtifact, ReturnSlot,
+    WitnessManifest,
 };
 
 use crate::{
@@ -1010,7 +1010,6 @@ impl Driver {
                 blob.total
             )));
         }
-        let layout = r1cs.witness_layout;
         let returns = match (blob.return_width, abi.return_type.as_ref()) {
             (Some(len), Some(ret)) => Some(ReturnSlot {
                 column_start: columns.returns,
@@ -1025,7 +1024,6 @@ impl Driver {
             }
         };
         let manifest = WitnessManifest {
-            entry_blob_field_count: blob.total,
             parameters: abi
                 .parameters
                 .iter()
@@ -1034,21 +1032,11 @@ impl Driver {
                 .map(|((param, slot), column_start)| ManifestParam {
                     name: param.name.clone(),
                     visibility: abi_visibility(param.visibility),
-                    blob_offset: slot.offset,
                     width: slot.width,
                     column_start: *column_start,
                 })
                 .collect(),
             returns,
-            challenges: (0..layout.challenges_size)
-                .map(|i| ChallengeSlot {
-                    witness_index: layout.challenges_start() + i,
-                    w2_offset: i,
-                })
-                .collect(),
-            pre_commitment_size: layout.pre_commitment_size(),
-            witness_count: layout.size(),
-            constraint_count: r1cs.constraints.len(),
         };
         manifest.validate(r1cs).map_err(Error::WitnessManifest)?;
         Ok(manifest)
