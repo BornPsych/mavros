@@ -3941,7 +3941,7 @@ pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
 /// numbers or operands, the `BoxedLayout` encoding, or the header layout must bump this.
 /// Appending opcodes without changing existing production encodings does not require a bump.
 /// The third word names the program's field ([`FieldId::code`]).
-pub const PROGRAM_FORMAT_VERSION: u64 = 3;
+pub const PROGRAM_FORMAT_VERSION: u64 = 4;
 
 impl Program {
     /// Serialize executable VM bytecode. Debug information is never embedded in this output.
@@ -5205,7 +5205,7 @@ mod tests {
     #[test]
     fn opcode_numbers_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 3,
+            PROGRAM_FORMAT_VERSION, 4,
             "the format version these numbers belong to"
         );
         let pinned: &[(usize, &str)] = &[
@@ -6120,7 +6120,7 @@ mod tests {
     #[test]
     fn boxed_layout_encodings_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 3,
+            PROGRAM_FORMAT_VERSION, 4,
             "the format version these encodings belong to"
         );
         let codes = [
@@ -6220,7 +6220,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsupported VM program format version Some(1); expected 3")]
+    #[should_panic(expected = "unsupported VM program format version Some(1); expected 4")]
     fn a_binary_of_another_format_version_is_refused() {
         // A version-1 binary, which has no field word.
         parse_program_header(&[PROGRAM_MAGIC, 1, 0, 0, 0, 0, u64::MAX, 0]);
@@ -6247,7 +6247,7 @@ mod tests {
     #[test]
     fn the_program_header_names_its_field() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 3,
+            PROGRAM_FORMAT_VERSION, 4,
             "the format version these codes belong to"
         );
         assert_eq!([FieldId::Bn254.code(), FieldId::Goldilocks.code()], [1, 2]);

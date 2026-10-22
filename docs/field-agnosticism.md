@@ -639,7 +639,7 @@ non-native fields; neither is the Noir `Field` used to constrain their arithmeti
       later, benchmarked swap behind the façade impls only; Goldilocks is hand-written (Phase 5).
 - [x] **Program header** — `vm/src/bytecode.rs` (`to_binary`/`to_binary_impl` write it,
       `ProgramHeader`/`parse_program_header` read it) opens with `PROGRAM_MAGIC`,
-      `PROGRAM_FORMAT_VERSION` (3) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
+      `PROGRAM_FORMAT_VERSION` (4) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
       0 names none). Dispatch needs no field selection, since the opcodes name the field
       (`bn254_add_field`, …); the word lets `interpreter::run*::<F>` refuse, in every build, a
       program over another field, whose handlers would read and write the wrong element width.
