@@ -1,7 +1,7 @@
 pub mod field;
 pub mod manifest;
 
-use std::{collections::BTreeMap, fmt::Display, ops::Deref, sync::OnceLock};
+use std::{cell::OnceCell, collections::BTreeMap, fmt::Display, ops::Deref};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
@@ -615,7 +615,7 @@ impl<F: MavrosField> R1CS<F> {
 #[derive(Clone, Debug)]
 pub struct SealedR1CS<F: MavrosField = Field> {
     system: R1CS<F>,
-    digest: OnceLock<[u8; 32]>,
+    digest: OnceCell<[u8; 32]>,
 }
 
 impl<F: MavrosField> Deref for SealedR1CS<F> {
@@ -630,7 +630,7 @@ impl<F: MavrosField> SealedR1CS<F> {
     pub fn new(system: R1CS<F>) -> Self {
         Self {
             system,
-            digest: OnceLock::new(),
+            digest: OnceCell::new(),
         }
     }
 
