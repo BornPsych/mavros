@@ -508,6 +508,7 @@ impl<F: MavrosField> symbolic_executor::Context<Value<F>> for R1CGen<F> {
     }
 
     fn on_return(&mut self, _returns: &mut [Value<F>], _return_types: &[Type]) {
+        self.current_entry_origin = None;
         if self.profile.is_some() {
             self.pop_profile_frame();
         }
@@ -1004,6 +1005,7 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
 
     fn fresh_witness(_result_type: &Type, ctx: &mut R1CGen<F>) -> Self {
         let witness_var = ctx.next_witness();
+        ctx.record_entry_column(witness_var);
         ctx.record_witnesses(1);
         Value::LC(vec![(witness_var, F::from_element(ctx.field().one()))])
     }
@@ -1235,13 +1237,16 @@ impl<F: MavrosField> R1CGen<F> {
     fn next_witness(&mut self) -> usize {
         let result = self.next_witness;
         self.next_witness += 1;
+        result
+    }
+
+    fn record_entry_column(&mut self, column: usize) {
         if let Some(origin) = &self.current_entry_origin {
             self.entry_columns
                 .entry(Arc::clone(origin))
                 .or_default()
-                .push(result);
+                .push(column);
         }
-        result
     }
 
     pub fn entry_columns(&self) -> &BTreeMap<Arc<str>, Vec<usize>> {
