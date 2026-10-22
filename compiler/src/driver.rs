@@ -844,6 +844,7 @@ impl Driver {
         Ok(SealedR1CS::new(r1cs))
     }
 
+    /// Only `pub` pins; a `call_data` parameter is private.
     fn abi_param_is_public(abi: &noirc_abi::Abi) -> Vec<bool> {
         abi.parameters
             .iter()
@@ -857,10 +858,6 @@ impl Driver {
             .entry_blob_layout
             .as_ref()
             .expect("prepare_entry_point records the entry blob layout before R1CS generation");
-        let param_is_public = self
-            .abi
-            .as_ref()
-            .map_or_else(|| vec![true; blob.params.len()], Self::abi_param_is_public);
         let run_of = |origin: String, width: usize, what: &str| -> Option<usize> {
             let columns = recorded.get(synthetic_file(origin).as_str())?;
             if columns.len() != width {
@@ -884,7 +881,7 @@ impl Driver {
                     slot.width,
                     &format!("entry parameter {index}"),
                 );
-                if column.is_none() && slot.width != 0 && param_is_public[index] {
+                if column.is_none() && slot.width != 0 && slot.public {
                     ice!("public entry parameter {index} has no witness columns");
                 }
                 column

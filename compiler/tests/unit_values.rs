@@ -205,3 +205,78 @@ fn run(source: &str, inputs: &str, expected_fields: usize, accepted: bool) {
     );
     assert_eq!(checked.is_ok(), accepted, "{source}: {checked:?}");
 }
+
+#[test]
+fn an_unread_entry_blob_survives_bytecode_dce() {
+    // The inputs are declared but not read yet; the body only checks the hard-coded limbs.
+    run(
+        "global LIMBS: [Field; 4] = [0x1f, 0x2e, 0x3d, 0x4c];
+
+        fn main(owner: Field, path: [Field; 3]) -> pub Field {
+            let mut digest = 0;
+            for i in 0..4 {
+                digest = digest * 256 + LIMBS[i];
+            }
+            assert(digest != 0);
+            digest
+        }",
+        "owner = '1'\npath = ['2', '3', '4']\nreturn = '523124044'",
+        4,
+        true,
+    );
+}
+
+#[test]
+fn data_bus_parameters_are_private() {
+    use mavros_artifacts::ParamVisibility;
+    use mavros_compiler::abi_helpers;
+
+    let dir = common::noir_project(
+        "fn main(x: call_data(0) Field, y: pub Field, _unused: call_data(0) Field) -> return_data Field {
+            x * y
+        }",
+    );
+    std::fs::write(
+        dir.path().join("Prover.toml"),
+        "x = '6'\ny = '7'\n_unused = '1'\nreturn = '42'",
+    )
+    .unwrap();
+    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+    let manifest = driver.witness_manifest(&r1cs).unwrap();
+    let columns: Vec<_> = manifest
+        .parameters
+        .iter()
+        .map(|p| (p.name.as_str(), p.visibility, p.column_start))
+        .collect();
+    // The public `y` is pinned first; the read `x` follows unpinned; the unread one is elided.
+    assert_eq!(
+        columns,
+        vec![
+            ("x", ParamVisibility::DataBus, Some(2)),
+            ("y", ParamVisibility::Public, Some(1)),
+            ("_unused", ParamVisibility::DataBus, None),
+        ]
+    );
+    let ret = manifest.returns.unwrap();
+    assert_eq!(ret.visibility, ParamVisibility::DataBus);
+    assert!(ret.column_start.is_some(), "the return is bound to columns");
+
+    let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let mut artifact = driver
+        .compile_bytecode_artifact(CodeGenOptions {
+            check_constraints: true,
+            include_debug_info: true,
+        })
+        .unwrap();
+    let result =
+        api::run_witgen_from_binary(&mut artifact.binary, &r1cs, &params, artifact.debug_info)
+            .unwrap();
+    assert!(api::check_witgen(&r1cs, &result));
+    abi_helpers::check_witness_manifest(
+        &manifest,
+        &params,
+        declared_return.as_ref(),
+        &result.out_wit_pre_comm,
+    )
+    .unwrap();
+}

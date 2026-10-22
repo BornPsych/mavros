@@ -473,8 +473,9 @@ fn run_phase1_impl<F: mavros_artifacts::MavrosField>(
         inputs.len(),
         header.entry_blob_field_count,
     );
-    // The program itself writes inputs to the witness tape via pinned WriteWitness instructions,
-    // public parameters first.
+    // The program writes its public parameters to the witness tape with pinned WriteWitness
+    // instructions, then its private ones unpinned, so an unused private parameter may never
+    // reach the tape.
     let out_wit_post_comm = vec![F::ZERO; witness_layout.post_commitment_size()];
     let mut global_frame = vec![0u64; global_frame_size];
     let mut vm = VM::new_witgen(

@@ -1602,6 +1602,31 @@ mod bounds_tests {
     }
 
     #[test]
+    fn entry_params_survive_unless_r1cs_gen_drops_them() {
+        for (config, kept) in [(Config::post_r1c(), 2), (Config::r1cs_gen(), 0)] {
+            let mut ssa = HLSSA::new();
+            let main = ssa.get_unique_entrypoint_id();
+            HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+                let mut e = b.test_block(b.function.get_entry_id());
+                let x = e.add_parameter(Type::int(32));
+                let y = e.add_parameter(Type::int(32));
+                // Never used: the parameters die with it.
+                e.uadd(x, y);
+                e.terminate_return(vec![]);
+            });
+            let flow = FlowAnalysis::run(&ssa);
+            DCE::new(config).do_run(&mut ssa, &flow);
+            let entry = ssa.get_unique_entrypoint().get_entry();
+            assert_eq!(entry.get_parameters().count(), kept);
+            assert_eq!(
+                entry.get_instructions().count(),
+                0,
+                "the dead add goes either way"
+            );
+        }
+    }
+
+    #[test]
     fn unreachable_sequence_definitions_do_not_require_types() {
         let mut ssa = HLSSA::new();
         let main = ssa.get_unique_entrypoint_id();

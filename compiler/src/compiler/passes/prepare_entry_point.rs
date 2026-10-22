@@ -28,10 +28,12 @@
 //!
 //! The constant one, public parameters and all return leaves are pinned. Each return column is
 //! constrained equal to its computed value; an optional `return` in `Prover.toml` is compared
-//! against it by the host after witness generation.
+//! against it by the host after witness generation. A `call_data` parameter is written with the
+//! private ones, and a `return_data` return is bound like any other.
 //!
 //! Private parameter writes feed a per-parameter array through a counted loop. Its dynamic index
-//! prevents splitting, so DCE retains or elides the whole parameter. Integer range checks keep
+//! prevents splitting, so DCE retains or elides the whole parameter; a one-field parameter is
+//! written directly, since a one-element array cannot split. Integer range checks keep
 //! otherwise unused parameters live. The driver rejects partially surviving parameters.
 //! [`entry_param_origin`] and [`ENTRY_RETURN_ORIGIN`] tag writes so the R1CS generator can recover
 //! their columns after DCE.
@@ -69,6 +71,8 @@ pub const ENTRY_RETURN_ORIGIN: &str = "entry point: return";
 pub struct BlobSlot {
     pub offset: usize,
     pub width: usize,
+    /// The ABI's `pub`, or every parameter of a hand-built SSA.
+    pub public: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,7 +235,8 @@ impl PrepareEntryPoint {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
 
-        let layout = Self::entry_blob_layout(&param_types, &return_types, has_return);
+        let layout =
+            Self::entry_blob_layout(&param_types, &return_types, has_return, &param_is_public);
         let total_fields = layout.total;
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
@@ -250,10 +255,25 @@ impl PrepareEntryPoint {
 
             // The per-parameter array keeps private writes live or dead together under DCE.
             let emit_param_writes = |e: &mut HLBlockEmitter<'_>, slot: BlobSlot, pinned: bool| {
-                let BlobSlot { offset, width } = slot;
+                let BlobSlot { offset, width, .. } = slot;
                 let initial_array = Self::emit_default_witness_array(e, &Type::field(), width);
                 if width == 0 {
                     return initial_array;
+                }
+                let write = |e: &mut HLBlockEmitter<'_>, elem: ValueId| {
+                    if pinned {
+                        e.pinned_write_witness(elem)
+                    } else {
+                        e.write_witness(elem)
+                    }
+                };
+                if width == 1 {
+                    // A one-element array cannot be split, so no loop is needed to keep it whole.
+                    let index = e.int_const(IntBits::from_u128(32, offset as u128));
+                    let elem = e.array_get(blob_param, index);
+                    let witness = write(e, elem);
+                    let zero = e.int_const(IntBits::zero(32));
+                    return e.array_set(initial_array, zero, witness);
                 }
                 let copied = e.build_counted_loop(
                     width,
@@ -266,11 +286,7 @@ impl PrepareEntryPoint {
                             e.uadd(base, i)
                         };
                         let elem = e.array_get(blob_param, source);
-                        let witness = if pinned {
-                            e.pinned_write_witness(elem)
-                        } else {
-                            e.write_witness(elem)
-                        };
+                        let witness = write(e, elem);
                         let updated = e.array_set(accumulators[0], i, witness);
                         vec![updated]
                     },
@@ -283,7 +299,7 @@ impl PrepareEntryPoint {
             let mut witness_arrays: Vec<Option<ValueId>> = vec![None; param_types.len()];
             for pinned in [true, false] {
                 for (index, slot) in layout.params.iter().enumerate() {
-                    if param_is_public[index] != pinned {
+                    if slot.public != pinned {
                         continue;
                     }
                     let origin = SourceLocation::synthetic(entry_param_origin(index));
@@ -543,19 +559,22 @@ impl PrepareEntryPoint {
         param_types: &[Type],
         return_types: &[Type],
         has_return: bool,
+        param_is_public: &[bool],
     ) -> EntryBlobLayout {
         let mut offset = 0usize;
-        let mut slot = |width: usize| {
+        let mut slot = |width: usize, public: bool| {
             let start = offset;
             offset += width;
             BlobSlot {
                 offset: start,
                 width,
+                public,
             }
         };
         let params = param_types
             .iter()
-            .map(|typ| slot(Self::flattened_field_count(typ)))
+            .zip(param_is_public)
+            .map(|(typ, public)| slot(Self::flattened_field_count(typ), *public))
             .collect();
         let return_width =
             has_return.then(|| return_types.iter().map(Self::flattened_field_count).sum());
@@ -1305,16 +1324,37 @@ mod tests {
         );
     }
 
-    /// Every witness write of the wrapper, as `(origin, pinned)`, in block order.
+    /// Every witness write of the wrapper, as `(origin, pinned)`, in control-flow order: a loop
+    /// body before the block after the loop.
     fn wrapper_writes(ssa: &HLSSA) -> Vec<(String, bool)> {
-        ssa.get_unique_entrypoint()
-            .get_blocks()
-            .flat_map(|(_, block)| block.get_instructions_with_source_locations())
-            .filter_map(|(instruction, location)| match instruction {
-                OpCode::WriteWitness { pinned, .. } => Some((location.file.to_string(), *pinned)),
-                _ => None,
-            })
-            .collect()
+        let function = ssa.get_unique_entrypoint();
+        let mut writes = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![function.get_entry_id()];
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let block = function.get_block(id);
+            writes.extend(block.get_instructions_with_source_locations().filter_map(
+                |(instruction, location)| match instruction {
+                    OpCode::WriteWitness { pinned, .. } => {
+                        Some((location.file.to_string(), *pinned))
+                    }
+                    _ => None,
+                },
+            ));
+            match block.get_terminator() {
+                Some(Terminator::Jmp(target, _)) => pending.push(*target),
+                // The taken branch, a loop body, is visited before the fall-through.
+                Some(Terminator::JmpIf(_, then_block, else_block)) => {
+                    pending.push(*else_block);
+                    pending.push(*then_block);
+                }
+                Some(Terminator::Return(_)) | None => {}
+            }
+        }
+        writes
     }
 
     #[test]
