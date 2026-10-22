@@ -268,8 +268,9 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         },
     )
     .unwrap();
-    // A wrong return differing only above bit 128 must fail the declared-return check on the
-    // high limb's column. The circuit computes the true return, so its witness still holds.
+    // A wrong return differing only above bit 128 is refused twice: the host's declared-return
+    // check names the high limb's column, and a witness forged with that limb breaks a
+    // constraint. The circuit computes the true return, so the honest witness itself holds.
     let correct_high = 1u128 << 52;
     let wrong_high = 2u128 << 52;
     std::fs::write(
@@ -293,6 +294,16 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
     assert!(
         error.contains("declared return") && error.contains(&format!("witness[{high_column}]")),
         "{error}"
+    );
+    let mut forged = [
+        result.out_wit_pre_comm.as_slice(),
+        result.out_wit_post_comm.as_slice(),
+    ]
+    .concat();
+    forged[high_column] = mavros_artifacts::Field::from(wrong_high);
+    assert!(
+        r1cs.unsatisfied_constraint(&forged).is_some(),
+        "wrong high return limb must violate R1CS"
     );
 
     let out_of_range = num_bigint::BigUint::from(1u8) << 128;

@@ -72,7 +72,7 @@ fn sweep_over(kind: BinaryArithOpKind, bits: usize, pairs: Vec<(IntBits, IntBits
         .iter()
         .find(|(lhs, rhs)| mavros_int_semantics::eval(op, lhs, rhs).value().is_some())
         .unwrap_or_else(|| panic!("{kind:?} at {bits} bits: the model accepts no corner pair"));
-    if let Err(error) = oracle.check_wrong_return_is_reported(&accepted.0, &accepted.1) {
+    if let Err(error) = oracle.check_a_wrong_answer_is_refused(&accepted.0, &accepted.1) {
         panic!("{error}");
     }
 }
@@ -266,7 +266,7 @@ fn a_division_agrees_between_the_host_word_and_the_widest_single_cell_product() 
 /// The ablation: the tests above can go red. One program is driven to each case:
 ///
 /// - The model's value is accepted.
-/// - A value the model did not produce is refused at the return check.
+/// - A value the model did not produce is reported as a return mismatch.
 /// - Operands the model rejects are refused elsewhere.
 #[test]
 fn the_oracle_distinguishes_a_wrong_answer_from_a_refusal() {

@@ -574,6 +574,20 @@ impl<F: HarnessField> Compiled<F> {
         }
     }
 
+    /// The witness columns the program's computed return was written to; empty for a program
+    /// without one.
+    #[must_use]
+    pub fn return_columns(&self) -> std::ops::Range<usize> {
+        if self.return_width == 0 {
+            return 0..0;
+        }
+        let start = self
+            .entry_columns
+            .returns
+            .expect("a program with a return writes its return columns");
+        start..start + self.return_width
+    }
+
     /// The witness column of each parameter field, in blob order.
     fn param_columns(&self) -> Vec<usize> {
         self.entry_columns
@@ -609,11 +623,7 @@ impl<F: HarnessField> Compiled<F> {
         if self.return_width == 0 {
             return Verdict::Accepted { witness };
         }
-        let start = self
-            .entry_columns
-            .returns
-            .expect("a program with a return writes its return columns");
-        let actual = witness[start..start + self.return_width].to_vec();
+        let actual = witness[self.return_columns()].to_vec();
         let expected: Vec<F> = declared
             .iter()
             .map(|value| match value {
@@ -783,9 +793,18 @@ impl<F: HarnessField> BinaryOpOracle<F> {
         }
     }
 
-    /// Checks that the host reports a wrong expected return as [`Verdict::ReturnMismatch`].
-    /// This does not test constraint soundness. Panics if the model rejects the operands.
-    pub fn check_wrong_return_is_reported(
+    /// Confirms that this program's return columns are constrained, by forging an answer the
+    /// model did not give into an honest witness and requiring a constraint to refuse it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description if the forged witness satisfies every constraint, or if the honest
+    /// run was not accepted, which leaves nothing to forge and says nothing about the return.
+    ///
+    /// # Panics
+    ///
+    /// If the model rejects these operands, since then there is no right answer to perturb.
+    pub fn check_a_wrong_answer_is_refused(
         &self,
         lhs: &IntBits,
         rhs: &IntBits,
@@ -793,20 +812,37 @@ impl<F: HarnessField> BinaryOpOracle<F> {
         let expected = mavros_int_semantics::eval(self.op, lhs, rhs)
             .value()
             .expect("operands the model rejects have no right answer to perturb");
-
-        // Flipping the low bit keeps the value in range, so only the return check can refuse it.
-        let wrong = expected.xor(&IntBits::from_u128(expected.bits(), 1));
-
-        let verdict = self.compiled.run(&input_block_in(&[lhs, rhs, &wrong]));
-        match verdict {
-            Verdict::ReturnMismatch { .. } => Ok(()),
-            other => Err(format!(
-                "{:?}({lhs:?}, {rhs:?}): expected a return mismatch — declaring {wrong:?} \
-                 instead of {expected:?} gave {other:?}{}",
+        let honest = self.compiled.run(&input_block_in(&[lhs, rhs, &expected]));
+        let Some(witness) = honest.witness() else {
+            return Err(format!(
+                "{:?}({lhs:?}, {rhs:?}): the honest run was not accepted, so there is no witness \
+                 to forge: {honest:?}{}",
                 self.kind,
                 self.where_to_look()
-            )),
+            ));
+        };
+
+        // Flipping the low bit keeps the forged return a valid `bits`-wide integer, so only the
+        // binding of the return can refuse it.
+        let wrong = expected.xor(&IntBits::from_u128(expected.bits(), 1));
+        let columns = self.compiled.return_columns();
+        assert_eq!(columns.len(), 1, "a binary operation returns one field");
+        let mut forged = witness.to_vec();
+        forged[columns.start] = input_element(&wrong);
+
+        if self
+            .compiled
+            .first_unsatisfied_constraint(&forged)
+            .is_some()
+        {
+            return Ok(());
         }
+        Err(format!(
+            "{:?}({lhs:?}, {rhs:?}): the return is not constrained: a witness claiming {wrong:?} \
+             instead of {expected:?} satisfies every constraint{}",
+            self.kind,
+            self.where_to_look()
+        ))
     }
 }
 

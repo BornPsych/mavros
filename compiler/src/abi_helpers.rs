@@ -37,7 +37,15 @@ pub fn declared_return_from_btreemap(
             ));
             Ok(None)
         }
-        (None, _) => Ok(None),
+        // Noir's parser drops `return` for an ABI without one; only a hand-built map gets here.
+        (None, Some(_)) => {
+            warn!(message = %format!(
+                "the inputs supply `{MAIN_RETURN_NAME}` but the program has no return; it is \
+                 ignored"
+            ));
+            Ok(None)
+        }
+        (None, None) => Ok(None),
     }
 }
 

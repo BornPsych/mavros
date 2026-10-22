@@ -374,7 +374,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             &result.out_a,
             &result.out_b,
             &result.out_c,
-        ) && check_witness_manifest(&manifest, &inputs, &result.out_wit_pre_comm);
+        ) && check_parameter_columns(&manifest, &inputs, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_CORRECT:ok"
         } else {
@@ -570,7 +570,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             &result.out_a,
             &result.out_b,
             &result.out_c,
-        ) && check_witness_manifest(&manifest, &inputs, &result.out_wit_pre_comm);
+        ) && check_parameter_columns(&manifest, &inputs, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
@@ -639,24 +639,20 @@ type ProverInputs = (
 
 type Manifest = Option<Result<WitnessManifest, String>>;
 
-fn check_witness_manifest(
+/// The parameter columns only: the declared return was already scored at the run step.
+fn check_parameter_columns(
     manifest: &Manifest,
     inputs: &Result<ProverInputs, String>,
     wit_pre_comm: &[RawField],
 ) -> bool {
-    let (Some(manifest), Ok((params, declared_return))) = (manifest, inputs) else {
+    let (Some(manifest), Ok((params, _))) = (manifest, inputs) else {
         return false;
     };
     manifest
         .as_ref()
         .map_err(Clone::clone)
         .and_then(|manifest| {
-            abi_helpers::check_witness_manifest(
-                manifest,
-                params,
-                declared_return.as_ref(),
-                wit_pre_comm,
-            )
+            abi_helpers::check_witness_manifest(manifest, params, None, wit_pre_comm)
         })
         .inspect_err(|reason| eprintln!("witness manifest check failed: {reason}"))
         .is_ok()

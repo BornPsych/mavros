@@ -599,20 +599,22 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
         info!(message = %"Witgen output is correct");
     }
 
-    if let Err(reason) = driver
-        .witness_manifest(&r1cs)
-        .map_err(|error| error.to_string())
-        .and_then(|manifest| {
-            mavros_compiler::abi_helpers::check_witness_manifest(
+    match driver.witness_manifest(&r1cs) {
+        Err(error) => {
+            error!(message = %"Could not build the witness manifest", reason = %error);
+            checks_passed = false;
+        }
+        Ok(manifest) => {
+            if let Err(reason) = mavros_compiler::abi_helpers::check_witness_manifest(
                 &manifest,
                 &params,
                 declared_return.as_ref(),
                 &witgen_result.out_wit_pre_comm,
-            )
-        })
-    {
-        error!(message = %"Witness manifest disagrees with the generated witness", reason = %reason);
-        checks_passed = false;
+            ) {
+                error!(message = %"Witness manifest disagrees with the generated witness", reason = %reason);
+                checks_passed = false;
+            }
+        }
     }
 
     let leftover_memory = plotting::plot_memory_chart(

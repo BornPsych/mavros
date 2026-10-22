@@ -226,9 +226,10 @@ impl Driver {
     /// Builds a driver around an already-constructed [`HLSSA`], bypassing the Noir frontend, so a
     /// feature can be prototyped before the frontend supports it.
     ///
-    /// Such a driver has no [`Self::abi`], so [`Self::entry_blob_field_count`] and the WASM
-    /// metadata sidecar are unavailable, and no [`Self::package_root`]: both belong to the Noir
-    /// package, which an SSA does not carry.
+    /// Such a driver has no [`Self::abi`], so [`Self::entry_blob_field_count`],
+    /// [`Self::witness_manifest`], [`Self::r1cs_artifact`] and the WASM metadata sidecar are
+    /// unavailable, and no [`Self::package_root`]: all belong to the Noir package, which an SSA
+    /// does not carry.
     ///
     /// `debug_output_dir` is created, or emptied if it exists, as [`Self::new`] does with the
     /// package's `mavros_debug`.
